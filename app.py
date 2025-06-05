@@ -18,6 +18,13 @@ def send_telegram_message(chat_id, text):
     payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
 
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    print("Полученные данные:", data)
+    return jsonify({"status": "received", "data": data}), 200
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
