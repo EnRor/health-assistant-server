@@ -2,11 +2,13 @@ from flask import Flask, request, jsonify
 import os
 import requests
 import openai
+from openai import OpenAI
 from dotenv import load_dotenv
+import traceback
 
 load_dotenv()
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 ASSISTANT_INSTRUCTIONS = (
@@ -32,24 +34,22 @@ def webhook():
         return jsonify({"error": "No user input"}), 400
 
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": ASSISTANT_INSTRUCTIONS},
                 {"role": "user", "content": user_input}
             ]
         )
-        assistant_reply = response.choices[0].message["content"]
+        assistant_reply = response.choices[0].message.content
         send_telegram_message(chat_id, assistant_reply)
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()  # Выводит полную трассировку ошибки в логи Render
+        traceback.print_exc()
         print(f"[ERROR] {e}")
         send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
