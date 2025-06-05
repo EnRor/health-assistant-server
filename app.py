@@ -9,15 +9,13 @@ load_dotenv()
 app = Flask(__name__)
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
+ASSISTANT_INSTRUCTIONS = "Ты — доброжелательный и профессиональный ассистент по здоровью и фитнесу. Отвечай кратко, по делу, с чуткостью."
 
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
-
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -32,46 +30,23 @@ def webhook():
         return jsonify({"error": "No user input"}), 400
 
     try:
-        # Создаём thread
-        thread = openai.beta.threads.create()
-
-        # Отправляем сообщение от пользователя
-        openai.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=user_input
+        # Используем ChatCompletion напрямую вместо Assistants API
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",  # можно заменить на gpt-4-turbo или другой
+            messages=[
+                {"role": "system", "content": ASSISTANT_INSTRUCTIONS},
+                {"role": "user", "content": user_input}
+            ]
         )
 
-        # Запускаем ассистента
-        run = openai.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=ASSISTANT_ID
-        )
-
-        # Ждём выполнения
-        import time
-        while True:
-            status = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
-            if status.status == "completed":
-                break
-            elif status.status == "failed":
-                raise Exception("Ассистент не смог завершить ответ.")
-            time.sleep(1)
-
-        # Получаем сообщение от ассистента
-        messages = openai.beta.threads.messages.list(thread_id=thread.id)
-        assistant_reply = messages.data[0].content[0].text.value
-
-        # Отправляем пользователю в Telegram
+        assistant_reply = response.choices[0].message["content"]
         send_telegram_message(chat_id, assistant_reply)
-
-        return jsonify({"status": "success"}), 200
+        return jsonify({"status": "success", "reply": assistant_reply}), 200
 
     except Exception as e:
         print("Ошибка:", e)
-        send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
+        send_telegram_message(chat_id, "Произошла внутренняя ошибка.")
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
