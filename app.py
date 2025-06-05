@@ -44,9 +44,9 @@ def webhook():
         return jsonify({"status": "success"}), 200
 
         except Exception as e:
-        print(f"[ERROR] {e}")
-        send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
-        return jsonify({"error": str(e)}), 500
+            print(f"[ERROR] {e}")
+            send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
+            return jsonify({"error": str(e)}), 500
 
 
 
