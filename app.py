@@ -43,12 +43,10 @@ def webhook():
         send_telegram_message(chat_id, assistant_reply)
         return jsonify({"status": "success"}), 200
 
-        except Exception as e:
-            print(f"[ERROR] {e}")
-            send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
-            return jsonify({"error": str(e)}), 500
-
-
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
