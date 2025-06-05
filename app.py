@@ -18,16 +18,15 @@ def send_telegram_message(chat_id, text):
     payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
 
-@app.route("/webhook", methods=["POST"])
+@@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    print("Полученные данные:", data)
-    return jsonify({"status": "received", "data": data}), 200
 
+    # ВРЕМЕННО: вывод в лог полученных данных
+    print("=== ВХОДЯЩИЕ ДАННЫЕ ОТ TELEGRAM ===")
+    print(data)
+    print("===================================")
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json()
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     user_input = message.get("text")
@@ -46,6 +45,7 @@ def webhook():
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID
         )
+
         import time
         while True:
             status = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
@@ -62,6 +62,7 @@ def webhook():
     except Exception as e:
         send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
