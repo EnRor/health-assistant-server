@@ -1,161 +1,139 @@
-from flask import Flask, request, jsonify
-import openai
-import os
-import requests
-import json
-import re
-import time
+from flask import Flask, request
+import openai, json, os
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
-
-load_dotenv()
-
-openai.api_key = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+import pytz
+import logging
 
 app = Flask(__name__)
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+memory_file = "memory.json"
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-MEMORY_FILE = "memory.json"
-
-if not os.path.exists(MEMORY_FILE):
-    with open(MEMORY_FILE, "w") as f:
-        json.dump({}, f)
-
 def load_memory():
-    with open(MEMORY_FILE, "r") as f:
-        return json.load(f)
+    try:
+        with open(memory_file, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-def save_memory(data):
-    with open(MEMORY_FILE, "w") as f:
-        json.dump(data, f)
+def save_memory(memory):
+    with open(memory_file, "w") as f:
+        json.dump(memory, f)
 
-def send_telegram_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
+memory = load_memory()
 
-def schedule_reminder(chat_id, text, remind_time):
-    scheduler.add_job(
-        func=send_telegram_message,
-        trigger='date',
-        run_date=remind_time,
-        args=[chat_id, f"⏰ Напоминание: {text}"],
-        id=f"reminder-{chat_id}-{int(time.time())}"
-    )
+def get_user_memory(user_id):
+    return memory.get(str(user_id), {"context": {}, "timezone_offset": None})
 
-def parse_reminder(text):
-    match_relative = re.search(r"через (\d+) (минут[уы]?|час[аов]?)", text)
-    match_absolute = re.search(r"в (\d{1,2}):(\d{2})", text)
-    task_match = re.search(r"напомни(?:ть)? (.*?) (?:через|в)", text)
-    task = task_match.group(1) if task_match else "что-то важное"
+def update_user_memory(user_id, data):
+    memory[str(user_id)] = data
+    save_memory(memory)
 
-    now = datetime.now()
-    if match_relative:
-        qty = int(match_relative.group(1))
-        unit = match_relative.group(2)
-        if "мин" in unit:
-            return now + timedelta(minutes=qty), task
-        elif "час" in unit:
-            return now + timedelta(hours=qty), task
-    elif match_absolute:
-        hour = int(match_absolute.group(1))
-        minute = int(match_absolute.group(2))
+@app.route("/", methods=["GET"])
+def index():
+    return "HealthMate бот работает."
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.json
+        user_id = str(data["message"]["from"]["id"])
+        text = data["message"]["text"].strip().lower()
+        now_utc = datetime.utcnow()
+
+        user_mem = get_user_memory(user_id)
+        context = user_mem.get("context", {})
+        tz_offset = user_mem.get("timezone_offset")
+
+        reply = "Извините, я не понял запрос."
+
+        if "/start" in text:
+            reply = "Привет! Рада, что ты снова здесь. Как тебя зовут?"
+        elif "меня зовут" in text:
+            name = text.replace("меня зовут", "").strip().capitalize()
+            context["name"] = name
+            reply = f"Приятно познакомиться, {name}!"
+        elif "как меня зовут" in text:
+            name = context.get("name")
+            reply = f"Вас зовут {name}!" if name else "Я пока не знаю, как вас зовут."
+        elif "сейчас у меня" in text:
+            time_str = text.replace("сейчас у меня", "").strip()
+            try:
+                user_time = datetime.strptime(time_str, "%H:%M")
+                offset = (datetime.utcnow().replace(hour=user_time.hour, minute=user_time.minute) - now_utc).seconds // 60
+                context["timezone_offset"] = offset
+                reply = f"Хорошо, учту ваш часовой пояс."
+            except:
+                reply = "Пожалуйста, укажите время в формате ЧЧ:ММ"
+        elif "через" in text:
+            mins = extract_minutes(text)
+            if mins:
+                reminder_time = now_utc + timedelta(minutes=mins)
+                msg = extract_message(text) or "что-то важное"
+                schedule_reminder(user_id, reminder_time, msg, tz_offset)
+                reply = f"Напоминание установлено через {mins} минут — {msg}"
+        elif "в" in text:
+            abs_time = extract_absolute_time(text)
+            if abs_time:
+                reminder_time = abs_time - timedelta(minutes=user_mem.get("timezone_offset", 0) or 0)
+                msg = extract_message(text) or "что-то важное"
+                schedule_reminder(user_id, reminder_time, msg, tz_offset)
+                reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
+
+        user_mem["context"] = context
+        update_user_memory(user_id, user_mem)
+
+        send_message(user_id, reply)
+        return "ok"
+    except Exception as e:
+        logging.exception("Ошибка в webhook:")
+        return "error", 500
+
+def send_message(chat_id, text):
+    import requests
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": chat_id, "text": text})
+
+def extract_minutes(text):
+    import re
+    match = re.search(r"через (\d+)\s*(минут|час)", text)
+    if match:
+        num = int(match.group(1))
+        return num * 60 if "час" in match.group(2) else num
+    return None
+
+def extract_absolute_time(text):
+    import re
+    match = re.search(r"в\s*(\d{1,2}):(\d{2})", text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        now = datetime.utcnow()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target < now:
             target += timedelta(days=1)
-        return target, task
-    return None, None
+        return target
+    return None
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json()
-    message = data.get("message", {})
-    chat_id = str(message.get("chat", {}).get("id"))
-    user_input = message.get("text")
+def extract_message(text):
+    import re
+    match = re.search(r"(?:напомни.*?)(?:через|в).*?(?:\d+|\d{1,2}:\d{2})(.*)", text)
+    return match.group(1).strip() if match else None
 
-    if not user_input:
-        return jsonify({"error": "No user input"}), 400
+def schedule_reminder(user_id, dt, message, tz_offset=None):
+    local_time = dt + timedelta(minutes=tz_offset or 0)
+    scheduler.add_job(
+        send_message,
+        'date',
+        run_date=dt,
+        args=[user_id, f"⏰ Напоминание: {message}"],
+        id=f"reminder_{user_id}_{dt.timestamp()}",
+        misfire_grace_time=30
+    )
 
-    memory = load_memory()
-    user_data = memory.get(chat_id, {})
-
-    # Обработка напоминаний
-    if "напомни" in user_input.lower():
-        remind_time, task = parse_reminder(user_input)
-        if remind_time:
-            schedule_reminder(chat_id, task, remind_time)
-            send_telegram_message(chat_id, f"Напоминание установлено на {remind_time.strftime('%H:%M')} — {task}.")
-            return jsonify({"status": "reminder set"}), 200
-        else:
-            send_telegram_message(chat_id, "Не удалось распознать время напоминания. Попробуйте, например: 'напомни через 5 минут' или 'в 15:30'")
-            return jsonify({"status": "reminder failed"}), 200
-
-    # Сохраняем имя, если представились
-    if re.match(r"меня зовут (.+)", user_input.lower()):
-        name = re.match(r"меня зовут (.+)", user_input.lower()).group(1).strip().capitalize()
-        user_data["name"] = name
-        memory[chat_id] = user_data
-        save_memory(memory)
-        send_telegram_message(chat_id, f"Приятно познакомиться, {name}!")
-        return jsonify({"status": "name saved"}), 200
-
-    # Ответ на вопрос "Как меня зовут"
-    if "как меня зовут" in user_input.lower():
-        name = user_data.get("name")
-        if name:
-            send_telegram_message(chat_id, f"Вас зовут {name}!")
-        else:
-            send_telegram_message(chat_id, f"Я пока не знаю, как вас зовут. Представьтесь фразой 'меня зовут ...'")
-        return jsonify({"status": "name recall"}), 200
-
-    # Получение/создание thread_id
-    thread_id = user_data.get("thread_id")
-    if not thread_id:
-        thread = openai.beta.threads.create()
-        thread_id = thread.id
-        user_data["thread_id"] = thread_id
-        memory[chat_id] = user_data
-        save_memory(memory)
-
-    try:
-        openai.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_input
-        )
-
-        run = openai.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
-        )
-
-        while True:
-            status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            if status.status == "completed":
-                break
-            time.sleep(1)
-
-        messages = openai.beta.threads.messages.list(thread_id=thread_id)
-        assistant_reply = messages.data[0].content[0].text.value
-
-        send_telegram_message(chat_id, assistant_reply)
-        return jsonify({"status": "success"}), 200
-
-    except Exception as e:
-        import traceback
-        error_text = f"⚠️ Ошибка:\n{str(e)}\n\nТрассировка:\n{traceback.format_exc()}"
-        send_telegram_message(chat_id, error_text[:4000])  # Telegram ограничен 4096 символами
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/', methods=['GET'])
-def home():
-    return "Health Assistant is running."
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
