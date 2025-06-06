@@ -1,15 +1,16 @@
-# app.py
 from flask import Flask, request, jsonify
 import openai
 import os
-from dotenv import load_dotenv
 import requests
-from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime, timedelta
 import json
+import re
+import time
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Load environment variables
 load_dotenv()
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -18,66 +19,58 @@ app = Flask(__name__)
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# Memory file
 MEMORY_FILE = "memory.json"
-REMINDERS_FILE = "reminders.json"
 
-# Ensure memory persistence
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        with open(MEMORY_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_memory(memory):
+if not os.path.exists(MEMORY_FILE):
     with open(MEMORY_FILE, "w") as f:
-        json.dump(memory, f)
+        json.dump({}, f)
 
-memory = load_memory()
+def load_memory():
+    with open(MEMORY_FILE, "r") as f:
+        return json.load(f)
 
-# Send message to Telegram
+def save_memory(data):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f)
+
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
 
-# Schedule reminders
-def schedule_reminder(chat_id, message, run_time):
+def schedule_reminder(chat_id, text, remind_time):
     scheduler.add_job(
         func=send_telegram_message,
         trigger='date',
-        run_date=run_time,
-        args=[chat_id, message],
-        id=f"{chat_id}-{run_time}-{message}"
+        run_date=remind_time,
+        args=[chat_id, f"⏰ Напоминание: {text}"],
+        id=f"reminder-{chat_id}-{int(time.time())}"
     )
-    persist_reminder(chat_id, message, run_time)
 
-# Save reminders for recovery
-def persist_reminder(chat_id, message, run_time):
-    reminders = []
-    if os.path.exists(REMINDERS_FILE):
-        with open(REMINDERS_FILE, "r") as f:
-            reminders = json.load(f)
-    reminders.append({"chat_id": chat_id, "message": message, "run_time": run_time.isoformat()})
-    with open(REMINDERS_FILE, "w") as f:
-        json.dump(reminders, f)
+def parse_reminder(text):
+    match_relative = re.search(r"через (\d+) (минут[уы]?|час[аов]?)", text)
+    match_absolute = re.search(r"в (\d{1,2}):(\d{2})", text)
+    task_match = re.search(r"напомни(?:ть)? (.*?) (?:через|в)", text)
+    task = task_match.group(1) if task_match else "что-то важное"
 
-# Reload reminders
-@app.before_first_request
-def restore_reminders():
-    if os.path.exists(REMINDERS_FILE):
-        with open(REMINDERS_FILE, "r") as f:
-            reminders = json.load(f)
-            for r in reminders:
-                run_time = datetime.fromisoformat(r["run_time"])
-                if run_time > datetime.now():
-                    schedule_reminder(r["chat_id"], r["message"], run_time)
+    now = datetime.now()
+    if match_relative:
+        qty = int(match_relative.group(1))
+        unit = match_relative.group(2)
+        if "мин" in unit:
+            return now + timedelta(minutes=qty), task
+        elif "час" in unit:
+            return now + timedelta(hours=qty), task
+    elif match_absolute:
+        hour = int(match_absolute.group(1))
+        minute = int(match_absolute.group(2))
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target < now:
+            target += timedelta(days=1)
+        return target, task
+    return None, None
 
-@app.route("/ping")
-def ping():
-    return jsonify({"status": "alive"}), 200
-
-@app.route("/webhook", methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
     message = data.get("message", {})
@@ -85,67 +78,80 @@ def webhook():
     user_input = message.get("text")
 
     if not user_input:
-        return jsonify({"error": "No input"}), 400
+        return jsonify({"error": "No user input"}), 400
 
-    if user_input == "/start":
-        reply = "Здравствуйте! Я ваш персональный ассистент по здоровью, спорту и питанию. Представьтесь, пожалуйста."
-        send_telegram_message(chat_id, reply)
-        return jsonify({"status": "started"})
+    memory = load_memory()
+    user_data = memory.get(chat_id, {})
 
-    if chat_id not in memory:
-        memory[chat_id] = []
+    # Обработка напоминаний
+    if "напомни" in user_input.lower():
+        remind_time, task = parse_reminder(user_input)
+        if remind_time:
+            schedule_reminder(chat_id, task, remind_time)
+            send_telegram_message(chat_id, f"Напоминание установлено на {remind_time.strftime('%H:%M')} — {task}.")
+            return jsonify({"status": "reminder set"}), 200
+        else:
+            send_telegram_message(chat_id, "Не удалось распознать время напоминания. Попробуйте, например: 'напомни через 5 минут' или 'в 15:30'")
+            return jsonify({"status": "reminder failed"}), 200
 
-    memory[chat_id].append({"role": "user", "content": user_input})
-    save_memory(memory)
+    # Сохраняем имя, если представились
+    if re.match(r"меня зовут (.+)", user_input.lower()):
+        name = re.match(r"меня зовут (.+)", user_input.lower()).group(1).strip().capitalize()
+        user_data["name"] = name
+        memory[chat_id] = user_data
+        save_memory(memory)
+        send_telegram_message(chat_id, f"Приятно познакомиться, {name}!")
+        return jsonify({"status": "name saved"}), 200
 
-    # Assistant API interaction
-    try:
+    # Ответ на вопрос "Как меня зовут"
+    if "как меня зовут" in user_input.lower():
+        name = user_data.get("name")
+        if name:
+            send_telegram_message(chat_id, f"Вас зовут {name}!")
+        else:
+            send_telegram_message(chat_id, f"Я пока не знаю, как вас зовут. Представьтесь фразой 'меня зовут ...'")
+        return jsonify({"status": "name recall"}), 200
+
+    # Получение/создание thread_id
+    thread_id = user_data.get("thread_id")
+    if not thread_id:
         thread = openai.beta.threads.create()
-        for msg in memory[chat_id]:
-            openai.beta.threads.messages.create(
-                thread_id=thread.id,
-                role=msg["role"],
-                content=msg["content"]
-            )
+        thread_id = thread.id
+        user_data["thread_id"] = thread_id
+        memory[chat_id] = user_data
+        save_memory(memory)
+
+    try:
+        openai.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=user_input
+        )
 
         run = openai.beta.threads.runs.create(
-            thread_id=thread.id,
+            thread_id=thread_id,
             assistant_id=ASSISTANT_ID
         )
 
-        import time
         while True:
-            status = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
+            status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
             if status.status == "completed":
                 break
             time.sleep(1)
 
-        messages = openai.beta.threads.messages.list(thread_id=thread.id)
+        messages = openai.beta.threads.messages.list(thread_id=thread_id)
         assistant_reply = messages.data[0].content[0].text.value
 
-        memory[chat_id].append({"role": "assistant", "content": assistant_reply})
-        save_memory(memory)
-
-        # Parse reminders (simplified detection)
-        import re
-        match = re.search(r"напомни.*в (\d{1,2}:\d{2})", user_input.lower())
-        if match:
-            time_str = match.group(1)
-            reminder_time = datetime.strptime(time_str, "%H:%M").replace(
-                year=datetime.now().year,
-                month=datetime.now().month,
-                day=datetime.now().day
-            )
-            if reminder_time < datetime.now():
-                reminder_time += timedelta(days=1)
-            schedule_reminder(chat_id, "Напоминаю: " + user_input, reminder_time)
-
         send_telegram_message(chat_id, assistant_reply)
-        return jsonify({"status": "success"})
+        return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        send_telegram_message(chat_id, "Произошла ошибка: " + str(e))
+        send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/', methods=['GET'])
+def home():
+    return "Health Assistant is running."
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
