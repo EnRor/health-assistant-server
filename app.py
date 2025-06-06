@@ -146,8 +146,11 @@ def webhook():
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
+        import traceback
+        error_text = f"⚠️ Ошибка:\n{str(e)}\n\nТрассировка:\n{traceback.format_exc()}"
+        send_telegram_message(chat_id, error_text[:4000])  # Telegram ограничен 4096 символами
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/', methods=['GET'])
 def home():
