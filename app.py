@@ -1,5 +1,3 @@
-# app.py
-
 from flask import Flask, request
 import openai, os, json, logging
 from datetime import datetime, timedelta
@@ -10,7 +8,7 @@ import re
 
 app = Flask(__name__)
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai_client = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -21,7 +19,7 @@ scheduler.start()
 
 logging.basicConfig(level=logging.INFO)
 
-# === Память ===
+# === Память пользователей ===
 def load_memory():
     try:
         with open(memory_file, "r") as f:
@@ -36,19 +34,19 @@ def save_memory(memory):
 memory = load_memory()
 
 def get_user_memory(user_id):
-    return memory.get(str(user_id), {"context": {}, "timezone_offset": None})
+    return memory.get(str(user_id), {"thread_id": None, "context": {}, "timezone_offset": None})
 
 def update_user_memory(user_id, data):
     memory[str(user_id)] = data
     save_memory(memory)
 
-# === Отправка сообщений ===
+# === Telegram ===
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         res = requests.post(url, json={"chat_id": chat_id, "text": text})
         logging.info(f"Ответ Telegram: {res.status_code} {res.text}")
-    except Exception as e:
+    except Exception:
         logging.exception("Ошибка при отправке сообщения Telegram")
 
 # === Обработка времени ===
@@ -71,11 +69,11 @@ def extract_absolute_time(text):
     return None
 
 def extract_message(text):
-    match = re.search(r"(?:напомни.*?)(?:через|в).*?(?:\d+|\d{1,2}:\d{2})(.*)", text)
+    match = re.search(r"(?:напомни.*?)?(?:через|в).*?(?:\d+|\d{1,2}:\d{2})(.*)", text)
     return match.group(1).strip() if match else None
 
-# === Планирование ===
-def schedule_reminder(user_id, dt, message, tz_offset=None):
+# === Напоминания ===
+def schedule_reminder(user_id, dt, message):
     try:
         scheduler.add_job(
             send_message,
@@ -86,10 +84,45 @@ def schedule_reminder(user_id, dt, message, tz_offset=None):
             misfire_grace_time=30
         )
         logging.info(f"Запланировано напоминание на {dt}")
-    except Exception as e:
+    except Exception:
         logging.exception("Ошибка планирования напоминания")
 
-# === Основной маршрут ===
+# === AI Ответ через Assistants API ===
+def get_assistant_response(user_id, user_input):
+    user_mem = get_user_memory(user_id)
+    thread_id = user_mem.get("thread_id")
+
+    if not thread_id:
+        thread = openai_client.beta.threads.create()
+        thread_id = thread.id
+        user_mem["thread_id"] = thread_id
+        update_user_memory(user_id, user_mem)
+
+    openai_client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=user_input
+    )
+
+    run = openai_client.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=ASSISTANT_ID
+    )
+
+    # Ждём завершения
+    while True:
+        run = openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        if run.status in ["completed", "failed"]:
+            break
+
+    if run.status == "completed":
+        messages = openai_client.beta.threads.messages.list(thread_id=thread_id)
+        for msg in reversed(messages.data):
+            if msg.role == "assistant":
+                return msg.content[0].text.value
+    return "Извините, произошла ошибка при получении ответа."
+
+# === Webhook ===
 @app.route("/", methods=["GET"])
 def index():
     return "HealthMate бот работает."
@@ -104,17 +137,17 @@ def webhook():
             return "ok"
 
         user_id = str(data["message"]["from"]["id"])
-        text = data["message"]["text"].strip().lower()
+        text = data["message"]["text"].strip()
         now_utc = datetime.utcnow()
 
         user_mem = get_user_memory(user_id)
         context = user_mem.get("context", {})
         tz_offset = user_mem.get("timezone_offset")
 
-        reply = "Извините, я не понял запрос."
+        reply = None
 
         if "/start" in text:
-            reply = "Привет! Рада, что ты снова здесь. Как тебя зовут?"
+            reply = "Привет! Я твой AI-ассистент. Как тебя зовут?"
         elif "меня зовут" in text:
             name = text.replace("меня зовут", "").strip().capitalize()
             context["name"] = name
@@ -128,7 +161,7 @@ def webhook():
                 user_time = datetime.strptime(time_str, "%H:%M")
                 offset = (user_time.hour * 60 + user_time.minute) - (now_utc.hour * 60 + now_utc.minute)
                 user_mem["timezone_offset"] = offset
-                reply = f"Хорошо, учту ваш часовой пояс."
+                reply = "Хорошо, учту ваш часовой пояс."
             except:
                 reply = "Пожалуйста, укажите время в формате ЧЧ:ММ"
         elif "через" in text:
@@ -136,15 +169,18 @@ def webhook():
             if mins:
                 reminder_time = now_utc + timedelta(minutes=mins)
                 msg = extract_message(text) or "что-то важное"
-                schedule_reminder(user_id, reminder_time, msg, tz_offset)
+                schedule_reminder(user_id, reminder_time, msg)
                 reply = f"Напоминание установлено через {mins} минут — {msg}"
-        elif "в" in text:
+        elif re.search(r"\bв \d{1,2}:\d{2}\b", text):
             abs_time = extract_absolute_time(text)
             if abs_time:
                 reminder_time = abs_time - timedelta(minutes=user_mem.get("timezone_offset", 0) or 0)
                 msg = extract_message(text) or "что-то важное"
-                schedule_reminder(user_id, reminder_time, msg, tz_offset)
+                schedule_reminder(user_id, reminder_time, msg)
                 reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
+        
+        if not reply:
+            reply = get_assistant_response(user_id, text)
 
         user_mem["context"] = context
         update_user_memory(user_id, user_mem)
@@ -152,11 +188,10 @@ def webhook():
         send_message(user_id, reply)
         return "ok"
 
-    except Exception as e:
+    except Exception:
         logging.exception("Ошибка в webhook:")
         return "error", 500
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))  # Render задаёт переменную PORT
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
