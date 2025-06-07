@@ -155,3 +155,8 @@ def webhook():
     except Exception as e:
         logging.exception("Ошибка в webhook:")
         return "error", 500
+
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))  # Render задаёт переменную PORT
+    app.run(host="0.0.0.0", port=port)
