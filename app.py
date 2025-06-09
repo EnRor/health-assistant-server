@@ -27,6 +27,7 @@ scheduler.start()
 memory = {}
 
 def send_telegram_message(chat_id: int, text: str):
+    print(f"[send_telegram_message] To {chat_id}: {text}", flush=True)
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
@@ -36,23 +37,24 @@ def send_telegram_message(chat_id: int, text: str):
 def webhook():
     data = request.json
     message = data.get("message")
-
-    if not message or message.get("from", {}).get("is_bot") or not message.get("text"):
+    if not message:
         return jsonify({"ok": True})
 
     chat_id = message["chat"]["id"]
     user_id = message["from"]["id"]
-    user_message = message["text"]
+    user_message = message.get("text")
+
+    if message.get("from", {}).get("is_bot") or not user_message:
+        return jsonify({"ok": True})
+
+    thread_id = memory.get(user_id)
+    if not thread_id:
+        thread = openai.beta.threads.create()
+        thread_id = thread.id
+        memory[user_id] = thread_id
 
     try:
-        # Получаем или создаём thread
-        thread_id = memory.get(user_id)
-        if not thread_id:
-            thread = openai.beta.threads.create()
-            thread_id = thread.id
-            memory[user_id] = thread_id
-
-        # Создаём сообщение
+        # Добавляем сообщение пользователя в тред
         openai.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
@@ -65,7 +67,7 @@ def webhook():
             assistant_id=ASSISTANT_ID
         )
 
-        # Ждём завершения выполнения
+        # Ожидание выполнения
         while True:
             run_status = openai.beta.threads.runs.retrieve(
                 thread_id=thread_id,
@@ -77,29 +79,49 @@ def webhook():
 
         if run_status.status == "completed":
             messages = openai.beta.threads.messages.list(thread_id=thread_id)
+
             for msg in reversed(messages.data):
                 if msg.role == "assistant":
-                    for part in msg.content:
+                    parts = msg.content
+
+                    for part in parts:
                         if part.type == "text":
                             send_telegram_message(chat_id, part.text.value)
+
                         elif part.type == "function_call":
                             if part.function_call.name == "set_reminder":
                                 try:
-                                    params = json.loads(part.function_call.arguments)
-                                    reminder_text = params.get("reminder_text")
+                                    raw_args = part.function_call.arguments
+                                    print("[set_reminder] Raw arguments:", raw_args, flush=True)
+
+                                    # Попытка десериализации
+                                    if isinstance(raw_args, str):
+                                        params = json.loads(raw_args)
+                                    else:
+                                        params = raw_args  # fallback
+
+                                    print("[set_reminder] Parsed params:", params, flush=True)
+
+                                    reminder_text = params.get("reminder_text", "🔔 Напоминание")
                                     reminder_time_str = params.get("reminder_time")
+
+                                    if not reminder_time_str:
+                                        send_telegram_message(chat_id, "⚠️ Не указано время для напоминания.")
+                                        continue
 
                                     reminder_datetime = dateparser.parse(
                                         reminder_time_str,
                                         settings={'RELATIVE_BASE': datetime.now(), 'PREFER_DATES_FROM': 'future'}
                                     )
 
+                                    print(f"[set_reminder] Parsed datetime: {reminder_datetime}", flush=True)
+
                                     if not reminder_datetime:
-                                        send_telegram_message(chat_id, "❌ Не удалось распознать время напоминания.")
+                                        send_telegram_message(chat_id, f"⚠️ Не удалось распознать время из: '{reminder_time_str}'")
                                     else:
                                         delay_seconds = (reminder_datetime - datetime.now()).total_seconds()
                                         if delay_seconds <= 0:
-                                            send_telegram_message(chat_id, "⏳ Время напоминания должно быть в будущем.")
+                                            send_telegram_message(chat_id, "⚠️ Время напоминания должно быть в будущем.")
                                         else:
                                             scheduler.add_job(
                                                 send_telegram_message,
@@ -107,20 +129,20 @@ def webhook():
                                                 run_date=reminder_datetime,
                                                 args=[chat_id, f"🔔 Напоминание: {reminder_text}"]
                                             )
-                                            send_telegram_message(
-                                                chat_id,
-                                                f"✅ Напоминание установлено на {reminder_datetime.strftime('%d.%m.%Y %H:%M')}"
-                                            )
+                                            send_telegram_message(chat_id, f"✅ Напоминание установлено на {reminder_datetime.strftime('%d.%m.%Y %H:%M')}")
+
                                 except Exception as e:
-                                    send_telegram_message(chat_id, f"⚠️ Ошибка при установке напоминания: {str(e)}")
+                                    error_text = f"❌ Ошибка при установке напоминания: {str(e)}\n{traceback.format_exc()}"
+                                    print(error_text, flush=True)
+                                    send_telegram_message(chat_id, error_text)
                     break
         else:
             send_telegram_message(chat_id, "⚠️ Ассистент не смог обработать запрос.")
 
     except Exception as e:
-        error_text = f"Ошибка: {str(e)}\n{traceback.format_exc()}"
-        print(error_text)
-        send_telegram_message(chat_id, f"❌ Произошла ошибка при обращении к ассистенту.")
+        error_text = f"❌ Общая ошибка: {str(e)}\n{traceback.format_exc()}"
+        print(error_text, flush=True)
+        send_telegram_message(chat_id, "❌ Произошла ошибка при обращении к ассистенту.")
 
     return jsonify({"ok": True})
 
