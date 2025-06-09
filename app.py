@@ -110,7 +110,7 @@ def webhook():
                 continue
             elif run_status.status in ["failed", "cancelled", "expired"]:
                 send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
-                return jsonify({"ok": True}")
+                return jsonify({"ok": True})
 
             time.sleep(1)
 
