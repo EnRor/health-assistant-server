@@ -1,228 +1,83 @@
+import os
+import openai
 from flask import Flask, request
-import openai, os, json, logging
-from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler
-import pytz
 import requests
-import re
+
+# Настройки
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # Установите переменную окружения
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # Установите переменную окружения
+ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID")  # Установите переменную окружения
+
+openai.api_key = OPENAI_API_KEY
 
 app = Flask(__name__)
 
-openai_client = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-memory_file = "memory.json"
-scheduler = BackgroundScheduler()
-scheduler.start()
+# Получение/создание Thread ID для каждого пользователя
+user_threads = {}  # В реальной среде используйте базу данных
 
-logging.basicConfig(level=logging.INFO)
+def get_thread_id(user_id):
+    if user_id not in user_threads:
+        thread = openai.beta.threads.create()
+        user_threads[user_id] = thread.id
+    return user_threads[user_id]
 
-# === Память пользователей ===
-def load_memory():
-    try:
-        with open(memory_file, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+# Отправка сообщения в Telegram
 
-def save_memory(memory):
-    with open(memory_file, "w") as f:
-        json.dump(memory, f)
+def send_telegram_message(chat_id, text):
+    requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
+        "chat_id": chat_id,
+        "text": text
+    })
 
-memory = load_memory()
-
-def get_user_memory(user_id):
-    return memory.get(str(user_id), {"thread_id": None, "context": {}, "timezone_offset": None})
-
-def update_user_memory(user_id, data):
-    memory[str(user_id)] = data
-    save_memory(memory)
-
-# === Telegram ===
-def send_message(chat_id, text):
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        res = requests.post(url, json={"chat_id": chat_id, "text": text})
-        logging.info(f"Ответ Telegram: {res.status_code} {res.text}")
-    except Exception:
-        logging.exception("Ошибка при отправке сообщения Telegram")
-
-# === Обработка времени ===
-def extract_minutes(text):
-    match = re.search(r"через (\d+)\s*(минут|час)", text)
-    if match:
-        num = int(match.group(1))
-        return num * 60 if "час" in match.group(2) else num
-    return None
-
-def extract_absolute_time(text):
-    match = re.search(r"в\s*(\d{1,2}):(\d{2})", text)
-    if match:
-        hour, minute = int(match.group(1)), int(match.group(2))
-        now = datetime.utcnow()
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target < now:
-            target += timedelta(days=1)
-        return target
-    return None
-
-def extract_message(text):
-    match = re.search(r"(?:напомни(?:\s*мне)?\s*)?(?:через|в)\s*\d+(?::\d{2})?\s*(.*)", text, re.IGNORECASE)
-    return match.group(1).strip() if match and match.group(1).strip() else "что-то важное"
-
-# === Напоминания ===
-def schedule_reminder(user_id, dt, message):
-    try:
-        scheduler.add_job(
-            send_message,
-            'date',
-            run_date=dt,
-            args=[user_id, f"\u23f0 Напоминание: {message}"],
-            id=f"reminder_{user_id}_{dt.timestamp()}",
-            misfire_grace_time=30
-        )
-        logging.info(f"Запланировано напоминание на {dt}")
-    except Exception:
-        logging.exception("Ошибка планирования напоминания")
-
-def set_reminder(user_id: str, time_utc: str, message: str):
-    try:
-        dt = datetime.strptime(time_utc, "%Y-%m-%dT%H:%M:%SZ")
-        schedule_reminder(user_id, dt, message)
-        send_message(user_id, f"✅ Напоминание установлено на {dt.strftime('%H:%M')} UTC — {message}")
-    except Exception:
-        logging.exception("Ошибка при установке напоминания через function_calling")
-
-# === AI Ответ через Assistants API ===
-def get_assistant_response(user_id, user_input):
-    user_mem = get_user_memory(user_id)
-    thread_id = user_mem.get("thread_id")
-
-    if not thread_id:
-        thread = openai_client.beta.threads.create()
-        thread_id = thread.id
-        user_mem["thread_id"] = thread_id
-        update_user_memory(user_id, user_mem)
-
-    openai_client.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=user_input
-    )
-
-    run = openai_client.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID,
-        instructions="""
-            Если пользователь просит установить напоминание, проанализируй запрос и вызови функцию `set_reminder`.
-            Функция принимает параметры:
-            - user_id (строка)
-            - time_utc (строка в формате ISO 8601 UTC, например \"2025-06-09T17:30:00Z\")
-            - message (текст напоминания).
-        """
-    )
-
-    while True:
-        run = openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-        if run.status in ["completed", "failed"]:
-            break
-
-    if run.status == "completed":
-        messages = openai_client.beta.threads.messages.list(thread_id=thread_id)
-        for msg in reversed(messages.data):
-            if msg.role == "assistant":
-                content = msg.content[0]
-                if content.type == "text":
-                    return content.text.value
-                elif content.type == "function_call":
-                    func = content.function_call
-                    if func.name == "set_reminder":
-                        args = json.loads(func.arguments)
-                        set_reminder(user_id, args["time_utc"], args["message"])
-                        return f"✅ Напоминание запланировано на {args['time_utc']} — {args['message']}"
-
-    return "Извините, произошла ошибка при получении ответа."
-
-# === Webhook ===
-@app.route("/", methods=["GET"])
-def index():
-    return "HealthMate бот работает."
-
+# Обработка запроса Telegram
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    try:
-        data = request.json
-        logging.info(f"Получен запрос: {data}")
+    data = request.json
+    message = data.get("message")
 
-        if "message" not in data or "text" not in data["message"]:
-            return "ok"
+    if not message:
+        return {"ok": True}
 
-        user_id = str(data["message"]["from"]["id"])
-        text = data["message"]["text"].strip()
-        now_utc = datetime.utcnow()
+    chat_id = message["chat"]["id"]
+    user_id = message["from"]["id"]
+    user_message = message.get("text")
 
-        user_mem = get_user_memory(user_id)
-        context = user_mem.get("context", {})
-        tz_offset = user_mem.get("timezone_offset")
+    if user_message:
+        thread_id = get_thread_id(user_id)
 
-        reply = None
+        # Отправка сообщения в Thread
+        openai.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=user_message
+        )
 
-        if "/start" in text:
-            reply = "Привет! Я твой AI-ассистент. Как тебя зовут?"
+        # Запуск ассистента (без инструкций в коде)
+        run = openai.beta.threads.runs.create(
+            thread_id=thread_id,
+            assistant_id=ASSISTANT_ID
+        )
 
-        elif "меня зовут" in text:
-            name = text.replace("меня зовут", "").strip().capitalize()
-            context["name"] = name
-            reply = f"Приятно познакомиться, {name}!"
+        # Ожидание завершения выполнения
+        while True:
+            run_status = openai.beta.threads.runs.retrieve(
+                thread_id=thread_id,
+                run_id=run.id
+            )
+            if run_status.status == "completed":
+                break
 
-        elif "как меня зовут" in text:
-            name = context.get("name")
-            reply = f"Вас зовут {name}!" if name else "Я пока не знаю, как вас зовут."
+        # Получение ответа
+        messages = openai.beta.threads.messages.list(thread_id=thread_id)
+        for msg in reversed(messages.data):
+            if msg.role == "assistant":
+                send_telegram_message(chat_id, msg.content[0].text.value)
+                break
 
-        elif "сейчас у меня" in text:
-            time_str = text.replace("сейчас у меня", "").strip()
-            try:
-                user_time = datetime.strptime(time_str, "%H:%M")
-                offset = (user_time.hour * 60 + user_time.minute) - (now_utc.hour * 60 + now_utc.minute)
-                user_mem["timezone_offset"] = offset
-                reply = "Хорошо, учту ваш часовой пояс."
-            except:
-                reply = "Пожалуйста, укажите время в формате ЧЧ:ММ"
+    return {"ok": True}
 
-        elif "через" in text:
-            mins = extract_minutes(text)
-            if mins:
-                reminder_time = now_utc + timedelta(minutes=mins)
-                msg = extract_message(text)
-                schedule_reminder(user_id, reminder_time, msg)
-                reply = f"Напоминание установлено через {mins} минут — {msg}"
-
-        elif re.search(r"\bв \d{1,2}:\d{2}\b", text):
-            abs_time = extract_absolute_time(text)
-            if abs_time:
-                if tz_offset is None:
-                    reply = "Пожалуйста, укажите текущее местное время: напишите \"сейчас у меня ЧЧ:ММ\""
-                else:
-                    reminder_time = abs_time - timedelta(minutes=tz_offset)
-                    msg = extract_message(text)
-                    schedule_reminder(user_id, reminder_time, msg)
-                    reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
-
-        if not reply:
-            reply = get_assistant_response(user_id, text)
-
-        user_mem["context"] = context
-        update_user_memory(user_id, user_mem)
-
-        send_message(user_id, reply)
-        return "ok"
-
-    except Exception:
-        logging.exception("Ошибка в webhook:")
-        return "error", 500
-
+# Точка входа
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
