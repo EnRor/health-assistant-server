@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 import dateparser
 import requests
+import traceback
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -115,6 +116,9 @@ def webhook():
     except Exception as e:
         print(f"OpenAI API error: {e}")
         send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту.")
+        error_text = f"Ошибка в обработке запроса: {str(e)}\n{traceback.format_exc()}"
+        print(error_text)
+        send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту. Подробности в логах.")
 
     return jsonify({"ok": True})
 
