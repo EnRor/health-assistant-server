@@ -64,27 +64,32 @@ def webhook():
             thread=thread_id,
             messages=memory[thread_id]
         )
-
         response_message = response["message"]
         content = response_message["content"]["parts"][0] if "content" in response_message else None
 
-        # Проверка на вызов функции
         if "function_call" in response_message:
             func_name = response_message["function_call"]["name"]
             if func_name == "set_reminder":
                 params_raw = response_message["function_call"].get("parameters")
+
                 if isinstance(params_raw, str):
-                    params = json.loads(params_raw)
+                    try:
+                        params = json.loads(params_raw)
+                    except json.JSONDecodeError:
+                        send_telegram_message(chat_id, "Не удалось распарсить параметры функции.")
+                        return jsonify({"ok": True})
                 else:
                     params = params_raw
 
                 reminder_text = params.get("reminder_text")
                 reminder_time_str = params.get("reminder_time")
 
+                print(f"Получено время напоминания: {reminder_time_str}")
                 reminder_datetime = dateparser.parse(
                     reminder_time_str,
                     settings={'RELATIVE_BASE': datetime.now(), 'PREFER_DATES_FROM': 'future'}
                 )
+                print(f"Распознанное время: {reminder_datetime}")
 
                 if not reminder_datetime:
                     send_telegram_message(chat_id, "Не удалось распознать время напоминания. Пожалуйста, попробуйте еще раз.")
@@ -93,7 +98,6 @@ def webhook():
                     if delay_seconds <= 0:
                         send_telegram_message(chat_id, "Время напоминания должно быть в будущем.")
                     else:
-                        # Планируем напоминание
                         scheduler.add_job(
                             send_telegram_message,
                             'date',
@@ -102,11 +106,9 @@ def webhook():
                         )
                         send_telegram_message(chat_id, f"Напоминание установлено на {reminder_datetime.strftime('%d.%m.%Y %H:%M')}")
 
-                # Добавляем ответ ассистента с информацией об установке напоминания
                 memory[thread_id].append({"role": "assistant", "content": content})
                 return jsonify({"ok": True})
 
-        # Если функции не вызываются, просто отправляем ответ ассистента
         if content:
             send_telegram_message(chat_id, content)
             memory[thread_id].append({"role": "assistant", "content": content})
@@ -114,11 +116,11 @@ def webhook():
             send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
 
     except Exception as e:
-        print(f"OpenAI API error: {e}")
-        send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту.")
+        import traceback
         error_text = f"Ошибка в обработке запроса: {str(e)}\n{traceback.format_exc()}"
         print(error_text)
         send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту. Подробности в логах.")
+
 
     return jsonify({"ok": True})
 
