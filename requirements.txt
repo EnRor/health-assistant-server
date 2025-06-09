@@ -4,3 +4,4 @@ openai>=1.0.0
 requests
 APScheduler
 pytz==2024.1
+dateparser
