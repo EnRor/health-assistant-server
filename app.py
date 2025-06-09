@@ -1,132 +1,131 @@
 import os
-import json
-import time
-import threading
+import re
 from datetime import datetime, timedelta
-
-import openai
-import requests
 from flask import Flask, request, jsonify
+from openai import OpenAI
+import requests
+import dateparser
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
-# Храним данные пользователей в памяти
-user_threads = {}
-user_reminders = {}
+openai = OpenAI(api_key=OPENAI_API_KEY)
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-def send_telegram_message(chat_id, text):
-    try:
-        payload = {"chat_id": chat_id, "text": text}
-        response = requests.post(TELEGRAM_API_URL, json=payload)
-        print("[send_telegram_message]", response.status_code, response.text)
-    except Exception as e:
-        print(f"[send_telegram_message] Error: {e}")
+scheduler = BackgroundScheduler()
+scheduler.start()
 
-def schedule_reminder(chat_id, delay_seconds, reminder_text):
-    def reminder_job():
-        time.sleep(delay_seconds)
-        send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
-    threading.Thread(target=reminder_job).start()
+def send_telegram_message(chat_id: int, text: str):
+    requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
+        "chat_id": chat_id,
+        "text": text
+    })
 
-@app.route("/", methods=["GET"])
-def root():
-    return "OK", 200
+def parse_reminder_time(reminder_time_str: str, run_time: datetime) -> datetime:
+    """
+    Парсит строку с временем напоминания.
+    Поддерживает абсолютное время (например, 'сегодня в 15:00', 'завтра 10:30')
+    и относительное ('10 минут', '1 час', '30 секунд').
+    Возвращает datetime объекта UTC.
+    """
+    # Попытка распарсить как абсолютное время
+    dt = dateparser.parse(reminder_time_str, settings={'RELATIVE_BASE': run_time, 'RETURN_AS_TIMEZONE_AWARE': False})
+    if dt:
+        return dt
+
+    # Если не удалось распарсить, пробуем как относительное время (через regex)
+    pattern = r"(\d+)\s*(секунд|сек|минут|мин|час|часов|ч)"
+    match = re.search(pattern, reminder_time_str.lower())
+    if match:
+        value, unit = match.groups()
+        value = int(value)
+        if unit.startswith("сек"):
+            delta = timedelta(seconds=value)
+        elif unit.startswith("мин"):
+            delta = timedelta(minutes=value)
+        elif unit.startswith("час"):
+            delta = timedelta(hours=value)
+        else:
+            delta = timedelta(minutes=10)  # дефолт
+        return run_time + delta
+
+    # Если всё плохо, ставим дефолт через 10 минут
+    return run_time + timedelta(minutes=10)
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    data = request.json
+    message = data.get("message")
+    if not message:
+        return jsonify({"ok": True})
+
+    chat_id = message["chat"]["id"]
+    user_id = message["from"]["id"]
+    user_message = message.get("text")
+
+    if message.get("from", {}).get("is_bot"):
+        return jsonify({"ok": True})
+
+    if not user_message:
+        return jsonify({"ok": True})
+
+    thread_id = str(user_id)
+
     try:
-        data = request.get_json()
-        print("[webhook] Incoming:", json.dumps(data))
-
-        if "message" not in data or "text" not in data["message"]:
-            return jsonify({"ok": True})
-
-        chat_id = data["message"]["chat"]["id"]
-        user_message = data["message"]["text"]
-
-        # Получаем или создаём thread для пользователя
-        if chat_id not in user_threads:
-            thread = openai.beta.threads.create()
-            user_threads[chat_id] = thread.id
-        thread_id = user_threads[chat_id]
-
-        # Проверяем: нет ли активного run
-        existing_runs = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
-        if existing_runs.data and existing_runs.data[0].status in ["queued", "in_progress"]:
-            send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я ещё обрабатываю предыдущий запрос.")
-            return jsonify({"ok": True})
-
-        # Добавляем сообщение пользователя в тред
-        openai.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_message
+        response = openai.responses.create(
+            assistant=ASSISTANT_ID,
+            thread=thread_id,
+            messages=[{"role": "user", "content": user_message}],
+            tools=["set_reminder"],  # включаем функцию ассистента
         )
 
-        # Запускаем ассистента
-        run = openai.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
-        )
+        # Если ассистент вызвал функцию set_reminder
+        if "tool_calls" in response and response["tool_calls"]:
+            for tool_call in response["tool_calls"]:
+                if tool_call["tool"] == "set_reminder":
+                    params = tool_call.get("parameters", {})
+                    reminder_text = params.get("reminder_text")
+                    reminder_time_str = params.get("reminder_time")
 
-        # Ожидаем завершения run
-        while True:
-            run_status = openai.beta.threads.runs.retrieve(
-                thread_id=thread_id,
-                run_id=run.id
-            )
-            if run_status.status == "completed":
-                break
-            elif run_status.status == "requires_action":
-                tool_calls = run_status.required_action.submit_tool_outputs.tool_calls
-                outputs = []
+                    run_created_at = response.get("run", {}).get("created_at", None)
+                    if run_created_at:
+                        run_time = datetime.utcfromtimestamp(run_created_at)
+                    else:
+                        run_time = datetime.utcnow()
 
-                for tool_call in tool_calls:
-                    function_name = tool_call.function.name
-                    arguments = json.loads(tool_call.function.arguments)
+                    reminder_datetime = parse_reminder_time(reminder_time_str, run_time)
 
-                    if function_name == "set_reminder":
-                        delay_minutes = arguments.get("delay_minutes", 1)
-                        reminder_text = arguments.get("reminder_text", "Напоминание")
+                    # Запланировать напоминание в указанное время
+                    scheduler.add_job(
+                        send_telegram_message,
+                        trigger="date",
+                        run_date=reminder_datetime,
+                        args=[chat_id, f"🔔 Напоминание: {reminder_text}"],
+                    )
 
-                        schedule_reminder(chat_id, delay_minutes * 60, reminder_text)
+                    send_telegram_message(chat_id,
+                        f"Напоминание установлено на {reminder_datetime.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": f"Напоминание установлено через {delay_minutes} минут."
-                        })
-
-                openai.beta.threads.runs.submit_tool_outputs(
-                    thread_id=thread_id,
-                    run_id=run.id,
-                    tool_outputs=outputs
-                )
-                continue
-            elif run_status.status in ["failed", "cancelled", "expired"]:
-                send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
-                return jsonify({"ok": True})
-
-            time.sleep(1)
-
-        # Получаем финальное сообщение от ассистента
-        messages = openai.beta.threads.messages.list(thread_id=thread_id)
-        for msg in reversed(messages.data):
-            if msg.role == "assistant":
-                response_text = msg.content[0].text.value
-                send_telegram_message(chat_id, response_text)
-                break
+        else:
+            # Стандартный ответ ассистента
+            parts = response["message"]["content"].get("parts")
+            if parts and len(parts) > 0:
+                assistant_reply = parts[0]
+                send_telegram_message(chat_id, assistant_reply)
+            else:
+                send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
 
     except Exception as e:
-        print("❌ Общая ошибка:", e)
-        send_telegram_message(chat_id, "❌ Произошла ошибка при обращении к ассистенту.")
+        print(f"OpenAI API error: {e}")
+        send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту.")
 
     return jsonify({"ok": True})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
