@@ -69,8 +69,8 @@ def extract_absolute_time(text):
     return None
 
 def extract_message(text):
-    match = re.search(r"(?:напомни.*?)?(?:через|в).*?(?:\d+|\d{1,2}:\d{2})(.*)", text)
-    return match.group(1).strip() if match else None
+    match = re.search(r"(?:напомни(?:\s*мне)?\s*)?(?:через|в)\s*\d+(?::\d{2})?\s*(.*)", text, re.IGNORECASE)
+    return match.group(1).strip() if match and match.group(1).strip() else "что-то важное"
 
 # === Напоминания ===
 def schedule_reminder(user_id, dt, message):
@@ -86,6 +86,14 @@ def schedule_reminder(user_id, dt, message):
         logging.info(f"Запланировано напоминание на {dt}")
     except Exception:
         logging.exception("Ошибка планирования напоминания")
+
+def set_reminder(user_id: str, time_utc: str, message: str):
+    try:
+        dt = datetime.strptime(time_utc, "%Y-%m-%dT%H:%M:%SZ")
+        schedule_reminder(user_id, dt, message)
+        send_message(user_id, f"✅ Напоминание установлено на {dt.strftime('%H:%M')} UTC — {message}")
+    except Exception:
+        logging.exception("Ошибка при установке напоминания через function_calling")
 
 # === AI Ответ через Assistants API ===
 def get_assistant_response(user_id, user_input):
@@ -106,7 +114,14 @@ def get_assistant_response(user_id, user_input):
 
     run = openai_client.beta.threads.runs.create(
         thread_id=thread_id,
-        assistant_id=ASSISTANT_ID
+        assistant_id=ASSISTANT_ID,
+        instructions="""
+            Если пользователь просит установить напоминание, проанализируй запрос и вызови функцию `set_reminder`.
+            Функция принимает параметры:
+            - user_id (строка)
+            - time_utc (строка в формате ISO 8601 UTC, например \"2025-06-09T17:30:00Z\")
+            - message (текст напоминания).
+        """
     )
 
     while True:
@@ -118,7 +133,16 @@ def get_assistant_response(user_id, user_input):
         messages = openai_client.beta.threads.messages.list(thread_id=thread_id)
         for msg in reversed(messages.data):
             if msg.role == "assistant":
-                return msg.content[0].text.value
+                content = msg.content[0]
+                if content.type == "text":
+                    return content.text.value
+                elif content.type == "function_call":
+                    func = content.function_call
+                    if func.name == "set_reminder":
+                        args = json.loads(func.arguments)
+                        set_reminder(user_id, args["time_utc"], args["message"])
+                        return f"✅ Напоминание запланировано на {args['time_utc']} — {args['message']}"
+
     return "Извините, произошла ошибка при получении ответа."
 
 # === Webhook ===
@@ -171,7 +195,7 @@ def webhook():
             mins = extract_minutes(text)
             if mins:
                 reminder_time = now_utc + timedelta(minutes=mins)
-                msg = extract_message(text) or "что-то важное"
+                msg = extract_message(text)
                 schedule_reminder(user_id, reminder_time, msg)
                 reply = f"Напоминание установлено через {mins} минут — {msg}"
 
@@ -182,7 +206,7 @@ def webhook():
                     reply = "Пожалуйста, укажите текущее местное время: напишите \"сейчас у меня ЧЧ:ММ\""
                 else:
                     reminder_time = abs_time - timedelta(minutes=tz_offset)
-                    msg = extract_message(text) or "что-то важное"
+                    msg = extract_message(text)
                     schedule_reminder(user_id, reminder_time, msg)
                     reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
 
