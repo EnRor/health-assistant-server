@@ -7,17 +7,19 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
+ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")  # Это ID модели ассистента (например, "ft:...")
 
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
 
 def send_telegram_message(chat_id: int, text: str):
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
     })
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -36,25 +38,21 @@ def webhook():
     if not user_message:
         return jsonify({"ok": True})
 
-    thread_id = str(user_id)  # Используем user_id в качестве thread_id
+    # Формируем список сообщений - можно добавить историю из БД/памяти, сейчас только последнее
+    messages = [
+        {"role": "user", "content": user_message}
+    ]
 
     try:
-        # Формируем список сообщений для передачи (историю можно сохранять отдельно)
-        # Здесь отправляем только последнее сообщение пользователя
-        response = openai.responses.create(
-            assistant=ASSISTANT_ID,
-            thread=thread_id,
-            messages=[
-                {"role": "user", "content": user_message}
-            ]
+        # Вызов chat.completions.create с model=ASSISTANT_ID
+        response = openai.chat.completions.create(
+            model=ASSISTANT_ID,
+            messages=messages,
+            user=str(user_id)  # необязательно, но полезно для логирования и отслеживания
         )
 
-        # Ответ ассистента в формате: response["message"]["content"]["parts"]
-        assistant_reply = None
-        if response and "message" in response and "content" in response["message"]:
-            parts = response["message"]["content"].get("parts")
-            if parts and len(parts) > 0:
-                assistant_reply = parts[0]
+        # Получаем ответ ассистента из первого выбора
+        assistant_reply = response.choices[0].message.content
 
         if assistant_reply:
             send_telegram_message(chat_id, assistant_reply)
@@ -62,11 +60,11 @@ def webhook():
             send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
 
     except Exception as e:
-        # Логируем ошибку, отправляем уведомление
         print(f"OpenAI API error: {e}")
         send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту.")
 
     return jsonify({"ok": True})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
