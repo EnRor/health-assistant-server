@@ -109,7 +109,6 @@ def get_assistant_response(user_id, user_input):
         assistant_id=ASSISTANT_ID
     )
 
-    # Ждём завершения
     while True:
         run = openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run.status in ["completed", "failed"]:
