@@ -1,13 +1,16 @@
 import os
+import time
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
+from openai.types.beta.threads import Run
 
 app = Flask(__name__)
 
+# Переменные окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")  # Это ID модели ассистента (например, "ft:...")
+ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -25,45 +28,67 @@ def send_telegram_message(chat_id: int, text: str):
 def webhook():
     data = request.json
     message = data.get("message")
-    if not message:
+
+    if not message or message.get("from", {}).get("is_bot"):
         return jsonify({"ok": True})
 
     chat_id = message["chat"]["id"]
     user_id = message["from"]["id"]
     user_message = message.get("text")
 
-    if message.get("from", {}).get("is_bot"):
-        return jsonify({"ok": True})
-
     if not user_message:
         return jsonify({"ok": True})
 
-    # Формируем список сообщений - можно добавить историю из БД/памяти, сейчас только последнее
-    messages = [
-        {"role": "user", "content": user_message}
-    ]
-
     try:
-        # Вызов chat.completions.create с model=ASSISTANT_ID
-        response = openai.chat.completions.create(
-            model=ASSISTANT_ID,
-            messages=messages,
-            user=str(user_id)  # необязательно, но полезно для логирования и отслеживания
+        # Используем user_id в качестве thread_id
+        thread = openai.beta.threads.create()
+
+        # Добавляем сообщение в thread
+        openai.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=user_message
         )
 
-        # Получаем ответ ассистента из первого выбора
-        assistant_reply = response.choices[0].message.content
+        # Запускаем ассистента
+        run: Run = openai.beta.threads.runs.create(
+            thread_id=thread.id,
+            assistant_id=ASSISTANT_ID
+        )
+
+        # Ожидаем завершения run
+        while True:
+            run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
+            if run.status == "completed":
+                break
+            elif run.status in ["failed", "cancelled", "expired"]:
+                send_telegram_message(chat_id, "Ассистент не смог завершить обработку запроса.")
+                return jsonify({"ok": True})
+            time.sleep(1)
+
+        # Получаем ответ
+        messages = openai.beta.threads.messages.list(thread_id=thread.id)
+        assistant_reply = None
+
+        for msg in reversed(messages.data):
+            if msg.role == "assistant":
+                assistant_reply = msg.content[0].text.value
+                break
 
         if assistant_reply:
             send_telegram_message(chat_id, assistant_reply)
         else:
-            send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
-
+            send_telegram_message(chat_id, "Ассистент не дал ответа.")
     except Exception as e:
-        print(f"OpenAI API error: {e}")
+        print(f"Ошибка OpenAI: {e}")
         send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту.")
 
     return jsonify({"ok": True})
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Ассистент работает.", 200
 
 
 if __name__ == "__main__":
