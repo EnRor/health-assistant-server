@@ -1,61 +1,35 @@
 import os
-import re
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
+import dateparser
+import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests
-import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
+# Инициализация переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
 openai = OpenAI(api_key=OPENAI_API_KEY)
+
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Инициализация APScheduler
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+# Память в формате словаря: thread_id -> список сообщений
+memory = {}
 
 def send_telegram_message(chat_id: int, text: str):
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
     })
-
-def parse_reminder_time(reminder_time_str: str, run_time: datetime) -> datetime:
-    """
-    Парсит строку с временем напоминания.
-    Поддерживает абсолютное время (например, 'сегодня в 15:00', 'завтра 10:30')
-    и относительное ('10 минут', '1 час', '30 секунд').
-    Возвращает datetime объекта UTC.
-    """
-    # Попытка распарсить как абсолютное время
-    dt = dateparser.parse(reminder_time_str, settings={'RELATIVE_BASE': run_time, 'RETURN_AS_TIMEZONE_AWARE': False})
-    if dt:
-        return dt
-
-    # Если не удалось распарсить, пробуем как относительное время (через regex)
-    pattern = r"(\d+)\s*(секунд|сек|минут|мин|час|часов|ч)"
-    match = re.search(pattern, reminder_time_str.lower())
-    if match:
-        value, unit = match.groups()
-        value = int(value)
-        if unit.startswith("сек"):
-            delta = timedelta(seconds=value)
-        elif unit.startswith("мин"):
-            delta = timedelta(minutes=value)
-        elif unit.startswith("час"):
-            delta = timedelta(hours=value)
-        else:
-            delta = timedelta(minutes=10)  # дефолт
-        return run_time + delta
-
-    # Если всё плохо, ставим дефолт через 10 минут
-    return run_time + timedelta(minutes=10)
-
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -76,56 +50,73 @@ def webhook():
 
     thread_id = str(user_id)
 
+    # Инициализация истории сообщений для пользователя
+    if thread_id not in memory:
+        memory[thread_id] = []
+
+    # Добавляем сообщение пользователя в память
+    memory[thread_id].append({"role": "user", "content": user_message})
+
     try:
         response = openai.responses.create(
             assistant=ASSISTANT_ID,
             thread=thread_id,
-            messages=[{"role": "user", "content": user_message}],
-            tools=["set_reminder"],  # включаем функцию ассистента
+            messages=memory[thread_id]
         )
 
-        # Если ассистент вызвал функцию set_reminder
-        if "tool_calls" in response and response["tool_calls"]:
-            for tool_call in response["tool_calls"]:
-                if tool_call["tool"] == "set_reminder":
-                    params = tool_call.get("parameters", {})
-                    reminder_text = params.get("reminder_text")
-                    reminder_time_str = params.get("reminder_time")
+        response_message = response["message"]
+        content = response_message["content"]["parts"][0] if "content" in response_message else None
 
-                    run_created_at = response.get("run", {}).get("created_at", None)
-                    if run_created_at:
-                        run_time = datetime.utcfromtimestamp(run_created_at)
+        # Проверка на вызов функции
+        if "function_call" in response_message:
+            func_name = response_message["function_call"]["name"]
+            if func_name == "set_reminder":
+                params_raw = response_message["function_call"].get("parameters")
+                if isinstance(params_raw, str):
+                    params = json.loads(params_raw)
+                else:
+                    params = params_raw
+
+                reminder_text = params.get("reminder_text")
+                reminder_time_str = params.get("reminder_time")
+
+                reminder_datetime = dateparser.parse(
+                    reminder_time_str,
+                    settings={'RELATIVE_BASE': datetime.now(), 'PREFER_DATES_FROM': 'future'}
+                )
+
+                if not reminder_datetime:
+                    send_telegram_message(chat_id, "Не удалось распознать время напоминания. Пожалуйста, попробуйте еще раз.")
+                else:
+                    delay_seconds = (reminder_datetime - datetime.now()).total_seconds()
+                    if delay_seconds <= 0:
+                        send_telegram_message(chat_id, "Время напоминания должно быть в будущем.")
                     else:
-                        run_time = datetime.utcnow()
+                        # Планируем напоминание
+                        scheduler.add_job(
+                            send_telegram_message,
+                            'date',
+                            run_date=reminder_datetime,
+                            args=[chat_id, f"Напоминание: {reminder_text}"]
+                        )
+                        send_telegram_message(chat_id, f"Напоминание установлено на {reminder_datetime.strftime('%d.%m.%Y %H:%M')}")
 
-                    reminder_datetime = parse_reminder_time(reminder_time_str, run_time)
+                # Добавляем ответ ассистента с информацией об установке напоминания
+                memory[thread_id].append({"role": "assistant", "content": content})
+                return jsonify({"ok": True})
 
-                    # Запланировать напоминание в указанное время
-                    scheduler.add_job(
-                        send_telegram_message,
-                        trigger="date",
-                        run_date=reminder_datetime,
-                        args=[chat_id, f"🔔 Напоминание: {reminder_text}"],
-                    )
-
-                    send_telegram_message(chat_id,
-                        f"Напоминание установлено на {reminder_datetime.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-
+        # Если функции не вызываются, просто отправляем ответ ассистента
+        if content:
+            send_telegram_message(chat_id, content)
+            memory[thread_id].append({"role": "assistant", "content": content})
         else:
-            # Стандартный ответ ассистента
-            parts = response["message"]["content"].get("parts")
-            if parts and len(parts) > 0:
-                assistant_reply = parts[0]
-                send_telegram_message(chat_id, assistant_reply)
-            else:
-                send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
+            send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
 
     except Exception as e:
         print(f"OpenAI API error: {e}")
         send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту.")
 
     return jsonify({"ok": True})
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
