@@ -79,7 +79,7 @@ def schedule_reminder(user_id, dt, message):
             send_message,
             'date',
             run_date=dt,
-            args=[user_id, f"⏰ Напоминание: {message}"],
+            args=[user_id, f"\u23f0 Напоминание: {message}"],
             id=f"reminder_{user_id}_{dt.timestamp()}",
             misfire_grace_time=30
         )
@@ -148,13 +148,16 @@ def webhook():
 
         if "/start" in text:
             reply = "Привет! Я твой AI-ассистент. Как тебя зовут?"
+
         elif "меня зовут" in text:
             name = text.replace("меня зовут", "").strip().capitalize()
             context["name"] = name
             reply = f"Приятно познакомиться, {name}!"
+
         elif "как меня зовут" in text:
             name = context.get("name")
             reply = f"Вас зовут {name}!" if name else "Я пока не знаю, как вас зовут."
+
         elif "сейчас у меня" in text:
             time_str = text.replace("сейчас у меня", "").strip()
             try:
@@ -164,6 +167,7 @@ def webhook():
                 reply = "Хорошо, учту ваш часовой пояс."
             except:
                 reply = "Пожалуйста, укажите время в формате ЧЧ:ММ"
+
         elif "через" in text:
             mins = extract_minutes(text)
             if mins:
@@ -171,14 +175,18 @@ def webhook():
                 msg = extract_message(text) or "что-то важное"
                 schedule_reminder(user_id, reminder_time, msg)
                 reply = f"Напоминание установлено через {mins} минут — {msg}"
+
         elif re.search(r"\bв \d{1,2}:\d{2}\b", text):
             abs_time = extract_absolute_time(text)
             if abs_time:
-                reminder_time = abs_time - timedelta(minutes=user_mem.get("timezone_offset", 0) or 0)
-                msg = extract_message(text) or "что-то важное"
-                schedule_reminder(user_id, reminder_time, msg)
-                reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
-        
+                if tz_offset is None:
+                    reply = "Пожалуйста, укажите текущее местное время: напишите \"сейчас у меня ЧЧ:ММ\""
+                else:
+                    reminder_time = abs_time - timedelta(minutes=tz_offset)
+                    msg = extract_message(text) or "что-то важное"
+                    schedule_reminder(user_id, reminder_time, msg)
+                    reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
+
         if not reply:
             reply = get_assistant_response(user_id, text)
 
