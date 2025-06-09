@@ -127,3 +127,6 @@ def webhook():
         send_telegram_message(chat_id, "❌ Произошла ошибка при обращении к ассистенту.")
 
     return jsonify({"ok": True})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
