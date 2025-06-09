@@ -69,9 +69,8 @@ def extract_absolute_time(text):
     return None
 
 def extract_message(text):
-    # Улучшенный парсинг сообщения для напоминания
-    match = re.search(r"(?:напомни(?:\s*мне)?\s*)?(?:через|в)\s*\d+(?::\d{2})?\s*(.*)", text, re.IGNORECASE)
-    return match.group(1).strip() if match and match.group(1).strip() else "что-то важное"
+    match = re.search(r"(?:напомни.*?)?(?:через|в).*?(?:\d+|\d{1,2}:\d{2})(.*)", text)
+    return match.group(1).strip() if match else None
 
 # === Напоминания ===
 def schedule_reminder(user_id, dt, message):
@@ -107,8 +106,7 @@ def get_assistant_response(user_id, user_input):
 
     run = openai_client.beta.threads.runs.create(
         thread_id=thread_id,
-        assistant_id=ASSISTANT_ID,
-        instructions="Если пользователь просит установить напоминание, обязательно выдели время (в формате UTC), текст напоминания, и вызови функцию `set_reminder`."
+        assistant_id=ASSISTANT_ID
     )
 
     while True:
@@ -173,7 +171,7 @@ def webhook():
             mins = extract_minutes(text)
             if mins:
                 reminder_time = now_utc + timedelta(minutes=mins)
-                msg = extract_message(text)
+                msg = extract_message(text) or "что-то важное"
                 schedule_reminder(user_id, reminder_time, msg)
                 reply = f"Напоминание установлено через {mins} минут — {msg}"
 
@@ -184,7 +182,7 @@ def webhook():
                     reply = "Пожалуйста, укажите текущее местное время: напишите \"сейчас у меня ЧЧ:ММ\""
                 else:
                     reminder_time = abs_time - timedelta(minutes=tz_offset)
-                    msg = extract_message(text)
+                    msg = extract_message(text) or "что-то важное"
                     schedule_reminder(user_id, reminder_time, msg)
                     reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
 
