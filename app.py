@@ -5,7 +5,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import requests
 import re
-import time
 
 app = Flask(__name__)
 
@@ -110,11 +109,10 @@ def get_assistant_response(user_id, user_input):
         assistant_id=ASSISTANT_ID
     )
 
-    for _ in range(60):
+    while True:
         run = openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run.status in ["completed", "failed"]:
             break
-        time.sleep(1)
 
     if run.status == "completed":
         messages = openai_client.beta.threads.messages.list(thread_id=thread_id)
