@@ -16,6 +16,9 @@ openai = OpenAI(api_key=OPENAI_API_KEY)
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Память: сопоставление Telegram user_id -> OpenAI thread_id
+user_threads = {}
+
 
 def send_telegram_message(chat_id: int, text: str):
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
@@ -40,25 +43,29 @@ def webhook():
         return jsonify({"ok": True})
 
     try:
-        # Используем user_id в качестве thread_id
-        thread = openai.beta.threads.create()
+        # Получаем или создаём thread для пользователя
+        thread_id = user_threads.get(user_id)
+        if not thread_id:
+            thread = openai.beta.threads.create()
+            thread_id = thread.id
+            user_threads[user_id] = thread_id
 
-        # Добавляем сообщение в thread
+        # Добавляем сообщение пользователя
         openai.beta.threads.messages.create(
-            thread_id=thread.id,
+            thread_id=thread_id,
             role="user",
             content=user_message
         )
 
         # Запускаем ассистента
         run: Run = openai.beta.threads.runs.create(
-            thread_id=thread.id,
+            thread_id=thread_id,
             assistant_id=ASSISTANT_ID
         )
 
         # Ожидаем завершения run
         while True:
-            run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
+            run = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
             if run.status == "completed":
                 break
             elif run.status in ["failed", "cancelled", "expired"]:
@@ -66,8 +73,8 @@ def webhook():
                 return jsonify({"ok": True})
             time.sleep(1)
 
-        # Получаем ответ
-        messages = openai.beta.threads.messages.list(thread_id=thread.id)
+        # Получаем ответ ассистента
+        messages = openai.beta.threads.messages.list(thread_id=thread_id)
         assistant_reply = None
 
         for msg in reversed(messages.data):
