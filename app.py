@@ -1,12 +1,13 @@
 import os
+import time
 import openai
 from flask import Flask, request
 import requests
 
 # Настройки
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # Установите переменную окружения
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # Установите переменную окружения
-ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID")  # Установите переменную окружения
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID")
 
 openai.api_key = OPENAI_API_KEY
 
@@ -24,7 +25,6 @@ def get_thread_id(user_id):
     return user_threads[user_id]
 
 # Отправка сообщения в Telegram
-
 def send_telegram_message(chat_id, text):
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
         "chat_id": chat_id,
@@ -54,7 +54,7 @@ def webhook():
             content=user_message
         )
 
-        # Запуск ассистента (без инструкций в коде)
+        # Запуск ассистента
         run = openai.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=ASSISTANT_ID
@@ -68,13 +68,27 @@ def webhook():
             )
             if run_status.status == "completed":
                 break
+            time.sleep(1)  # пауза для предотвращения чрезмерного опроса
 
-        # Получение ответа
+        # Получение всех сообщений и извлечение последнего ответа ассистента
         messages = openai.beta.threads.messages.list(thread_id=thread_id)
-        for msg in reversed(messages.data):
-            if msg.role == "assistant":
-                send_telegram_message(chat_id, msg.content[0].text.value)
-                break
+
+        assistant_messages = [
+            msg for msg in messages.data if msg.role == "assistant"
+        ]
+
+        if assistant_messages:
+            latest_message = assistant_messages[0]  # первое = самое новое
+            text_parts = [
+                block.text.value for block in latest_message.content if block.type == "text"
+            ]
+            final_text = "\n".join(text_parts).strip()
+            if final_text:
+                send_telegram_message(chat_id, final_text)
+            else:
+                send_telegram_message(chat_id, "⚠️ Ассистент не вернул текстовый ответ.")
+        else:
+            send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
 
     return {"ok": True}
 
