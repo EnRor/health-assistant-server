@@ -1,22 +1,23 @@
 import os
-import time
 import openai
 from flask import Flask, request
 import requests
+import time
 
-# Настройки
+# Настройки окружения
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID")
 
+# Установка API-ключа
 openai.api_key = OPENAI_API_KEY
 
+# Инициализация Flask
 app = Flask(__name__)
-
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Получение/создание Thread ID для каждого пользователя
-user_threads = {}  # В реальной среде используйте базу данных
+# Хранилище потоков пользователей (можно заменить на БД)
+user_threads = {}
 
 def get_thread_id(user_id):
     if user_id not in user_threads:
@@ -24,14 +25,23 @@ def get_thread_id(user_id):
         user_threads[user_id] = thread.id
     return user_threads[user_id]
 
-# Отправка сообщения в Telegram
 def send_telegram_message(chat_id, text):
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
     })
 
-# Обработка запроса Telegram
+def handle_function_call(function_call, chat_id):
+    name = function_call.get("name")
+    arguments = function_call.get("arguments")
+
+    if name == "set_reminder":
+        reminder_text = arguments.get("reminder_text")
+        reminder_time = arguments.get("reminder_time")
+
+        send_telegram_message(chat_id, f"Напоминание установлено: '{reminder_text}' через {reminder_time}")
+        # Здесь можно добавить логику планирования напоминания (например, APScheduler)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -47,7 +57,7 @@ def webhook():
     if user_message:
         thread_id = get_thread_id(user_id)
 
-        # Отправка сообщения в Thread
+        # Отправка пользовательского сообщения в Thread
         openai.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
@@ -60,7 +70,7 @@ def webhook():
             assistant_id=ASSISTANT_ID
         )
 
-        # Ожидание завершения выполнения
+        # Ожидание завершения run
         while True:
             run_status = openai.beta.threads.runs.retrieve(
                 thread_id=thread_id,
@@ -68,30 +78,20 @@ def webhook():
             )
             if run_status.status == "completed":
                 break
-            time.sleep(1)  # пауза для предотвращения чрезмерного опроса
+            time.sleep(1)
 
-        # Получение всех сообщений и извлечение последнего ответа ассистента
+        # Получение сообщений
         messages = openai.beta.threads.messages.list(thread_id=thread_id)
-
-        assistant_messages = [
-            msg for msg in messages.data if msg.role == "assistant"
-        ]
-
-        if assistant_messages:
-            latest_message = assistant_messages[0]  # первое = самое новое
-            text_parts = [
-                block.text.value for block in latest_message.content if block.type == "text"
-            ]
-            final_text = "\n".join(text_parts).strip()
-            if final_text:
-                send_telegram_message(chat_id, final_text)
-            else:
-                send_telegram_message(chat_id, "⚠️ Ассистент не вернул текстовый ответ.")
-        else:
-            send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
+        for msg in reversed(messages.data):
+            if msg.role == "assistant":
+                if msg.content:
+                    response_text = msg.content[0].text.value
+                    send_telegram_message(chat_id, response_text)
+                if msg.function_call:
+                    handle_function_call(msg.function_call, chat_id)
+                break
 
     return {"ok": True}
 
-# Точка входа
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
