@@ -1,135 +1,206 @@
-from flask import Flask, request, jsonify
-import openai
-import os
-import requests
-import time
-import json
-from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask, request
+import openai, os, json, logging
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-
-load_dotenv()
-
-openai.api_key = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
+import requests
+import re
+import time
 
 app = Flask(__name__)
+
+openai_client = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+memory_file = "memory.json"
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# Постоянная память между сессиями
-THREADS_FILE = "threads.json"
-if os.path.exists(THREADS_FILE):
-    with open(THREADS_FILE, "r") as f:
-        session_threads = json.load(f)
-else:
-    session_threads = {}
+logging.basicConfig(level=logging.INFO)
 
-# Сохранение в файл при изменении
-def save_threads():
-    with open(THREADS_FILE, "w") as f:
-        json.dump(session_threads, f)
-
-
-def send_telegram_message(chat_id, text):
-    url = f"{BASE_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
-
-
-def set_webhook():
-    webhook_url = os.getenv("RENDER_EXTERNAL_URL") + "/webhook"
-    requests.get(f"{BASE_URL}/setWebhook?url={webhook_url}")
-
-
-def schedule_reminder(chat_id, text, run_time):
-    scheduler.add_job(send_telegram_message, 'date', run_date=run_time, args=[chat_id, text])
-
-
-def parse_reminder_time(text):
+# === Память пользователей ===
+def load_memory():
     try:
-        if "через" in text:
-            parts = text.split("через")
-            minutes = int(parts[1].split("минут")[0].strip())
-            return datetime.now() + timedelta(minutes=minutes)
-        elif "в" in text:
-            parts = text.split("в")
-            time_part = parts[1].strip()
-            target_time = datetime.strptime(time_part, "%H:%M").time()
-            now = datetime.now()
-            reminder_dt = datetime.combine(now.date(), target_time)
-            if reminder_dt < now:
-                reminder_dt += timedelta(days=1)
-            return reminder_dt
-    except Exception as e:
-        print(f"[ERROR parsing time] {e}")
+        with open(memory_file, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_memory(memory):
+    with open(memory_file, "w") as f:
+        json.dump(memory, f)
+
+memory = load_memory()
+
+def get_user_memory(user_id):
+    return memory.get(str(user_id), {"thread_id": None, "context": {}, "timezone_offset": None})
+
+def update_user_memory(user_id, data):
+    memory[str(user_id)] = data
+    save_memory(memory)
+
+# === Telegram ===
+def send_message(chat_id, text):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        res = requests.post(url, json={"chat_id": chat_id, "text": text})
+        logging.info(f"Ответ Telegram: {res.status_code} {res.text}")
+    except Exception:
+        logging.exception("Ошибка при отправке сообщения Telegram")
+
+# === Обработка времени ===
+def extract_minutes(text):
+    match = re.search(r"через (\d+)\s*(минут|час)", text)
+    if match:
+        num = int(match.group(1))
+        return num * 60 if "час" in match.group(2) else num
     return None
 
+def extract_absolute_time(text):
+    match = re.search(r"в\s*(\d{1,2}):(\d{2})", text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        now = datetime.utcnow()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target < now:
+            target += timedelta(days=1)
+        return target
+    return None
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json()
-    message = data.get("message", {})
-    chat_id = str(message.get("chat", {}).get("id"))
-    user_input = message.get("text", "")
+def extract_message(text):
+    match = re.search(r"(?:напомни.*?)?(?:через|в).*?(?:\d+|\d{1,2}:\d{2})(.*)", text)
+    return match.group(1).strip() if match else None
 
-    if user_input.startswith("/start"):
-        welcome_text = (
-            "Привет! Я — твой персональный ассистент по здоровью, спорту и питанию.\n"
-            "Я могу давать советы, отвечать на вопросы и даже напоминать тебе о важных действиях!"
-        )
-        send_telegram_message(chat_id, welcome_text)
-        return jsonify({"status": "started"}), 200
-
+# === Напоминания ===
+def schedule_reminder(user_id, dt, message):
     try:
-        # Напоминания
-        if "напомни" in user_input.lower():
-            run_time = parse_reminder_time(user_input.lower())
-            if run_time:
-                text = "Напоминаю: " + user_input
-                schedule_reminder(chat_id, text, run_time)
-                send_telegram_message(chat_id, f"Хорошо, напомню {run_time.strftime('%H:%M')}.")
-            else:
-                send_telegram_message(chat_id, "Не смог разобрать время. Попробуй 'через 15 минут' или 'в 14:30'")
-            return jsonify({"status": "reminder set"}), 200
-
-        thread_id = session_threads.get(chat_id)
-        if not thread_id:
-            thread = openai.beta.threads.create()
-            thread_id = thread.id
-            session_threads[chat_id] = thread_id
-            save_threads()
-
-        openai.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_input
+        scheduler.add_job(
+            send_message,
+            'date',
+            run_date=dt,
+            args=[user_id, f"\u23f0 Напоминание: {message}"],
+            id=f"reminder_{user_id}_{dt.timestamp()}",
+            misfire_grace_time=30
         )
+        logging.info(f"Запланировано напоминание на {dt}")
+    except Exception:
+        logging.exception("Ошибка планирования напоминания")
 
-        run = openai.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
-        )
+# === AI Ответ через Assistants API ===
+def get_assistant_response(user_id, user_input):
+    user_mem = get_user_memory(user_id)
+    thread_id = user_mem.get("thread_id")
 
-        while True:
-            status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            if status.status == "completed":
-                break
-            time.sleep(1)
+    if not thread_id:
+        thread = openai_client.beta.threads.create()
+        thread_id = thread.id
+        user_mem["thread_id"] = thread_id
+        update_user_memory(user_id, user_mem)
 
-        messages = openai.beta.threads.messages.list(thread_id=thread_id)
-        assistant_reply = messages.data[0].content[0].text.value
-        send_telegram_message(chat_id, assistant_reply)
-        return jsonify({"status": "success"}), 200
+    openai_client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=user_input
+    )
 
-    except Exception as e:
-        send_telegram_message(chat_id, "Произошла ошибка при обработке запроса.")
-        return jsonify({"error": str(e)}), 500
+    run = openai_client.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=ASSISTANT_ID
+    )
 
+    for _ in range(60):
+        run = openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        if run.status in ["completed", "failed"]:
+            break
+        time.sleep(1)
 
-if __name__ == '__main__':
-    set_webhook()
-    port = int(os.environ.get("PORT", 10000))
+    if run.status == "completed":
+        messages = openai_client.beta.threads.messages.list(thread_id=thread_id)
+        for msg in reversed(messages.data):
+            if msg.role == "assistant":
+                return msg.content[0].text.value
+    return "Извините, произошла ошибка при получении ответа."
+
+# === Webhook ===
+@app.route("/", methods=["GET"])
+def index():
+    return "HealthMate бот работает."
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.json
+        logging.info(f"Получен запрос: {data}")
+
+        if "message" not in data or "text" not in data["message"]:
+            return "ok"
+
+        user_id = str(data["message"]["from"]["id"])
+        text = data["message"]["text"].strip()
+        now_utc = datetime.utcnow()
+
+        user_mem = get_user_memory(user_id)
+        context = user_mem.get("context", {})
+        tz_offset = user_mem.get("timezone_offset")
+
+        reply = None
+
+        if "/start" in text:
+            reply = "Привет! Я твой AI-ассистент. Как тебя зовут?"
+
+        elif "меня зовут" in text:
+            name = text.replace("меня зовут", "").strip().capitalize()
+            context["name"] = name
+            reply = f"Приятно познакомиться, {name}!"
+
+        elif "как меня зовут" in text:
+            name = context.get("name")
+            reply = f"Вас зовут {name}!" if name else "Я пока не знаю, как вас зовут."
+
+        elif "сейчас у меня" in text:
+            time_str = text.replace("сейчас у меня", "").strip()
+            try:
+                user_time = datetime.strptime(time_str, "%H:%M")
+                offset = (user_time.hour * 60 + user_time.minute) - (now_utc.hour * 60 + now_utc.minute)
+                user_mem["timezone_offset"] = offset
+                reply = "Хорошо, учту ваш часовой пояс."
+            except:
+                reply = "Пожалуйста, укажите время в формате ЧЧ:ММ"
+
+        elif "через" in text:
+            mins = extract_minutes(text)
+            if mins:
+                reminder_time = now_utc + timedelta(minutes=mins)
+                msg = extract_message(text) or "что-то важное"
+                schedule_reminder(user_id, reminder_time, msg)
+                reply = f"Напоминание установлено через {mins} минут — {msg}"
+
+        elif re.search(r"\bв \d{1,2}:\d{2}\b", text):
+            abs_time = extract_absolute_time(text)
+            if abs_time:
+                if tz_offset is None:
+                    reply = "Пожалуйста, укажите текущее местное время: напишите \"сейчас у меня ЧЧ:ММ\""
+                else:
+                    reminder_time = abs_time - timedelta(minutes=tz_offset)
+                    msg = extract_message(text) or "что-то важное"
+                    schedule_reminder(user_id, reminder_time, msg)
+                    reply = f"Напоминание установлено на {abs_time.strftime('%H:%M')} — {msg}"
+
+        if not reply:
+            reply = get_assistant_response(user_id, text)
+
+        user_mem["context"] = context
+        update_user_memory(user_id, user_mem)
+
+        send_message(user_id, reply)
+        return "ok"
+
+    except Exception:
+        logging.exception("Ошибка в webhook:")
+        return "error", 500
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
