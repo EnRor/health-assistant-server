@@ -27,6 +27,9 @@ scheduler.start()
 memory = {}
 
 def send_telegram_message(chat_id: int, text: str):
+    # Обрезаем длинные сообщения, чтобы не превышать лимит Telegram (4096 символов)
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n[Сообщение обрезано]"
     requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
@@ -58,6 +61,11 @@ def webhook():
     # Добавляем сообщение пользователя в память
     memory[thread_id].append({"role": "user", "content": user_message})
 
+    # Логируем входящие данные
+    print(f"Thread ID: {thread_id}")
+    print(f"User message: {user_message}")
+    print(f"Memory length: {len(memory[thread_id])}")
+
     try:
         response = openai.responses.create(
             assistant=ASSISTANT_ID,
@@ -65,13 +73,14 @@ def webhook():
             messages=memory[thread_id]
         )
         response_message = response["message"]
-        content = response_message["content"]["parts"][0] if "content" in response_message else None
+        print(f"Response message keys: {response_message.keys()}")
+
+        content = response_message.get("content", {}).get("parts", [None])[0]
 
         if "function_call" in response_message:
             func_name = response_message["function_call"]["name"]
             if func_name == "set_reminder":
                 params_raw = response_message["function_call"].get("parameters")
-
                 if isinstance(params_raw, str):
                     try:
                         params = json.loads(params_raw)
@@ -116,11 +125,9 @@ def webhook():
             send_telegram_message(chat_id, "Извините, не удалось получить ответ от ассистента.")
 
     except Exception as e:
-        import traceback
         error_text = f"Ошибка в обработке запроса: {str(e)}\n{traceback.format_exc()}"
         print(error_text)
-        send_telegram_message(chat_id, "Произошла ошибка при обращении к ассистенту. Подробности в логах.")
-
+        send_telegram_message(chat_id, f"Ошибка при вызове ассистента:\n{str(e)}")
 
     return jsonify({"ok": True})
 
