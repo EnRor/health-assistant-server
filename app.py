@@ -1,66 +1,81 @@
 import os
+import json
 import time
+import threading
+from datetime import datetime, timedelta
+
 import openai
-from flask import Flask, request
 import requests
-
-# Настройки
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID")
-
-openai.api_key = OPENAI_API_KEY
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-# Получение/создание Thread ID для каждого пользователя
-user_threads = {}  # В реальной среде используйте базу данных
+ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
-def get_thread_id(user_id):
-    if user_id not in user_threads:
-        thread = openai.beta.threads.create()
-        user_threads[user_id] = thread.id
-    return user_threads[user_id]
+# Храним данные пользователей в памяти
+user_threads = {}
+user_reminders = {}
 
-# Отправка сообщения в Telegram
 def send_telegram_message(chat_id, text):
-    requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text
-    })
+    try:
+        payload = {"chat_id": chat_id, "text": text}
+        response = requests.post(TELEGRAM_API_URL, json=payload)
+        print("[send_telegram_message]", response.status_code, response.text)
+    except Exception as e:
+        print(f"[send_telegram_message] Error: {e}")
 
-# Обработка запроса Telegram
+def schedule_reminder(chat_id, delay_seconds, reminder_text):
+    def reminder_job():
+        time.sleep(delay_seconds)
+        send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
+    threading.Thread(target=reminder_job).start()
+
+@app.route("/", methods=["GET"])
+def root():
+    return "OK", 200
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    message = data.get("message")
+    try:
+        data = request.get_json()
+        print("[webhook] Incoming:", json.dumps(data))
 
-    if not message:
-        return {"ok": True}
+        if "message" not in data or "text" not in data["message"]:
+            return jsonify({"ok": True})
 
-    chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
-    user_message = message.get("text")
+        chat_id = data["message"]["chat"]["id"]
+        user_message = data["message"]["text"]
 
-    if user_message:
-        thread_id = get_thread_id(user_id)
+        # Получаем или создаём thread для пользователя
+        if chat_id not in user_threads:
+            thread = openai.beta.threads.create()
+            user_threads[chat_id] = thread.id
+        thread_id = user_threads[chat_id]
 
-        # Отправка сообщения в Thread
+        # Проверяем: нет ли активного run
+        existing_runs = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
+        if existing_runs.data and existing_runs.data[0].status in ["queued", "in_progress"]:
+            send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я ещё обрабатываю предыдущий запрос.")
+            return jsonify({"ok": True})
+
+        # Добавляем сообщение пользователя в тред
         openai.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
             content=user_message
         )
 
-        # Запуск ассистента
+        # Запускаем ассистента
         run = openai.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=ASSISTANT_ID
         )
 
-        # Ожидание завершения выполнения
+        # Ожидаем завершения run
         while True:
             run_status = openai.beta.threads.runs.retrieve(
                 thread_id=thread_id,
@@ -68,7 +83,36 @@ def webhook():
             )
             if run_status.status == "completed":
                 break
-            time.sleep(1)  # пауза для предотвращения чрезмерного опроса
+            elif run_status.status == "requires_action":
+                tool_calls = run_status.required_action.submit_tool_outputs.tool_calls
+                outputs = []
+
+                for tool_call in tool_calls:
+                    function_name = tool_call.function.name
+                    arguments = json.loads(tool_call.function.arguments)
+
+                    if function_name == "set_reminder":
+                        delay_minutes = arguments.get("delay_minutes", 1)
+                        reminder_text = arguments.get("reminder_text", "Напоминание")
+
+                        schedule_reminder(chat_id, delay_minutes * 60, reminder_text)
+
+                        outputs.append({
+                            "tool_call_id": tool_call.id,
+                            "output": f"Напоминание установлено через {delay_minutes} минут."
+                        })
+
+                openai.beta.threads.runs.submit_tool_outputs(
+                    thread_id=thread_id,
+                    run_id=run.id,
+                    tool_outputs=outputs
+                )
+                continue
+            elif run_status.status in ["failed", "cancelled", "expired"]:
+                send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
+                return jsonify({"ok": True})
+
+            time.sleep(1)
 
         # Получение всех сообщений и извлечение последнего ответа ассистента
         messages = openai.beta.threads.messages.list(thread_id=thread_id)
@@ -92,6 +136,11 @@ def webhook():
 
     return {"ok": True}
 
-# Точка входа
+    except Exception as e:
+        print("❌ Общая ошибка:", e)
+        send_telegram_message(chat_id, "❌ Произошла ошибка при обращении к ассистенту.")
+
+    return jsonify({"ok": True})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
