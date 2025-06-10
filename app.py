@@ -57,32 +57,47 @@ def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
     threading.Thread(target=reminder_job).start()
 
 def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time):
-
-  # Установка напоминания на конкретное время
+    """
+    Устанавливает напоминание на конкретное время с учётом локального времени пользователя.
+    
+    :param chat_id: ID чата Telegram.
+    :param reminder_time_absolute: Время напоминания в формате "HH:MM" по локальному времени пользователя.
+    :param reminder_text: Текст напоминания.
+    :param user_local_time: Текущее локальное время пользователя в формате "HH:MM".
+    """
 
     try:
+        # Парсим входные времена пользователя (локальные)
+        user_now = datetime.strptime(user_local_time, "%H:%M")
+        user_now = user_now.replace(year=2000, month=1, day=1)  # фиктивная дата для вычислений
 
-        current_time = datetime.now()
+        reminder_time = datetime.strptime(reminder_time_absolute, "%H:%M")
+        reminder_time = reminder_time.replace(year=2000, month=1, day=1)
 
-        reminder_datetime = datetime.strptime(reminder_time_absolute, "%H:%M").replace(year=current_time.year, month=current_time.month, day=current_time.day)
+        # Разница между напоминанием и текущим локальным временем пользователя
+        delta = (reminder_time - user_now).total_seconds()
+        if delta < 0:
+            # Если время напоминания раньше текущего времени, переносим на следующий день
+            delta += 24 * 3600  # секунды в сутках
 
-        if reminder_datetime < current_time:
+        # Текущее время сервера
+        server_now = datetime.now()
 
-            reminder_datetime += timedelta(days=1)
+        # Вычисляем абсолютное время напоминания на сервере
+        reminder_datetime_server = server_now + timedelta(seconds=delta)
 
-        delay_seconds = (reminder_datetime - current_time).total_seconds()
+        delay_seconds = (reminder_datetime_server - server_now).total_seconds()
 
+        # Запуск напоминания в отдельном потоке
         def reminder_job():
-
             time.sleep(delay_seconds)
-
             send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
 
         threading.Thread(target=reminder_job).start()
 
     except ValueError as e:
+        send_telegram_message(chat_id, f"❌ Некорректный формат времени. Используйте HH:MM. Ошибка: {e}")
 
-      send_telegram_message(chat_id, f"❌ Некорректный формат времени. Используйте HH:MM. Ошибка: {e}")
 
 @app.route("/", methods=["GET"])
 
