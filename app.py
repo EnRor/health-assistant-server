@@ -134,7 +134,7 @@ def webhook():
         else:
             send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
 
-    return {"ok": True}
+    
 
     except Exception as e:
         print("❌ Общая ошибка:", e)
