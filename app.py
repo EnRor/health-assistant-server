@@ -29,20 +29,20 @@ user_threads = {}
 user_reminders = {}
 
 def send_telegram_message(chat_id, text):
-
-    # Отправка сообщения в Telegram
-
+    # Отправка сообщения в Telegram с поддержкой Markdown
     try:
-
-        payload = {"chat_id": chat_id, "text": text}
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"  # Или "MarkdownV2", если нужен более строгий контроль
+        }
 
         response = requests.post(TELEGRAM_API_URL, json=payload)
-
         print("[send_telegram_message]", response.status_code, response.text)
 
     except Exception as e:
-
         print(f"[send_telegram_message] Error: {e}")
+
 
 def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
 
