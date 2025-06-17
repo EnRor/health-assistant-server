@@ -222,6 +222,11 @@ def webhook():
 
     return jsonify({"ok": True})
 
+@app.route("/cron", methods=["GET"])
+def cron():
+    print(f"[cron] Ping received at {datetime.utcnow().isoformat()} UTC")
+    return "Cron OK", 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
