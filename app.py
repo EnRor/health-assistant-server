@@ -128,10 +128,7 @@ def webhook():
                 user_threads.pop(chat_id, None)
                 send_telegram_message(chat_id, "🚮 Память очищена.")
             elif data_key == "training_plan":
-                send_telegram_message(chat_id, "🏋️‍♀ План тренировок."):
-1. Разминка
-2. Силовая
-3. Кардио")
+                send_telegram_message(chat_id, "🏋️‍♀ План тренировок:\n1. Разминка\n2. Силовая\n3. Кардио")
             elif data_key == "reminders_list":
                 reminders = user_reminders.get(chat_id, [])
                 if reminders:
