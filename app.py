@@ -114,64 +114,52 @@ def webhook():
             data_key = callback["data"]
 
             if data_key == "memory_view":
-                # Обработка кнопки "Память" с запросом к ассистенту
                 thread_id = user_threads.get(chat_id)
+
                 if not thread_id:
                     thread = openai.beta.threads.create()
                     thread_id = thread.id
                     user_threads[chat_id] = thread_id
 
+    # Проверка на уже запущенный запрос
                 existing_runs = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
                 if existing_runs.data and existing_runs.data[0].status in ["queued", "in_progress"]:
                     send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я ещё обрабатываю предыдущий запрос.")
                     return jsonify({"ok": True})
 
-                openai.beta.threads.messages.create(
-                    thread_id=thread_id,
-                    role="user",
-                    content="Что ты обо мне помнишь?"
-                )
+    # Добавляем сообщение "Что ты обо мне помнишь?"
+            openai.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content="Что ты обо мне помнишь?"
+            )
 
-                run = openai.beta.threads.runs.create(
-                    thread_id=thread_id,
-                    assistant_id=ASSISTANT_ID
-                )
+            run = openai.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=ASSISTANT_ID
+            )
 
-                while True:
-                    run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-                    if run_status.status == "completed":
-                        break
-                    elif run_status.status == "failed":
-                        send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
-                        return jsonify({"ok": True})
-                    time.sleep(1)
+            while True:
+                run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+                if run_status.status == "completed":
+                    break
+                elif run_status.status == "failed":
+                    send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
+                    return jsonify({"ok": True})
+                time.sleep(1)
 
-                messages = openai.beta.threads.messages.list(thread_id=thread_id)
-                assistant_messages = [msg for msg in messages.data if msg.role == "assistant"]
+            messages = openai.beta.threads.messages.list(thread_id=thread_id)
+            assistant_messages = [msg for msg in messages.data if msg.role == "assistant"]
 
-                if assistant_messages:
-                    latest_message = assistant_messages[-1]
-                    text_parts = [block.text.value for block in latest_message.content if block.type == "text"]
-                    final_text = "\n".join(text_parts).strip()
-                    send_telegram_message(chat_id, final_text if final_text else "⚠️ Ассистент не вернул текстовый ответ.")
-                else:
-                    send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
-
-                return jsonify({"ok": True})
-
-            elif data_key == "memory_clear":
-                user_threads.pop(chat_id, None)
-                send_telegram_message(chat_id, "🚮 Память очищена.")
-
-            elif data_key == "training_plan":
-                send_telegram_message(chat_id, "🏋️‍♀ План тренировок:\n1. Разминка\n2. Силовая\n3. Кардио")
-
-            elif data_key == "reminders_list":
-                reminders = user_reminders.get(chat_id, [])
-                if reminders:
-                    send_telegram_message(chat_id, "🗓 Ваши напоминания:\n" + "\n".join(reminders))
-                else:
-                    send_telegram_message(chat_id, "🗓 Напоминаний нет.")
+            if assistant_messages:
+                latest_message = assistant_messages[-1]
+                text_parts = [
+                    block.text.value for block in latest_message.content if block.type == "text"
+                ]
+                final_text = "\n".join(text_parts).strip()
+                send_telegram_message(chat_id, final_text if final_text else "⚠️ Ассистент не вернул текст.")
+            else:
+                send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
 
             return jsonify({"ok": True})
 
