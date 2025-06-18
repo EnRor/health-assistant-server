@@ -19,6 +19,7 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 user_threads = {}
 user_reminders = {}
 
+
 def send_telegram_message(chat_id, text):
     try:
         payload = {
@@ -31,11 +32,12 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"[send_telegram_message] Error: {e}")
 
+
 def send_telegram_menu(chat_id):
     keyboard = [
         [{"text": "📋 Память", "callback_data": "memory_view"}],
         [{"text": "🗑 Очистить память", "callback_data": "memory_clear"}],
-        [{"text": "🏋️ План тренировок", "callback_data": "training_plan"}],
+        [{"text": "🏋️‍♀ План тренировок", "callback_data": "training_plan"}],
         [{"text": "🗓 Мои напоминания", "callback_data": "reminders_list"}]
     ]
     payload = {
@@ -46,11 +48,14 @@ def send_telegram_menu(chat_id):
     response = requests.post(TELEGRAM_API_URL, json=payload)
     print("[send_telegram_menu]", response.status_code, response.text)
 
+
 def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
     def reminder_job():
         time.sleep(delay_seconds)
         send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
     threading.Thread(target=reminder_job).start()
+    user_reminders.setdefault(chat_id, []).append(f"Через {int(delay_seconds // 60)} мин: {reminder_text}")
+
 
 def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time):
     try:
@@ -66,8 +71,10 @@ def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_
             time.sleep(delay_seconds)
             send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
         threading.Thread(target=reminder_job).start()
+        user_reminders.setdefault(chat_id, []).append(f"В {reminder_time_absolute}: {reminder_text}")
     except ValueError as e:
         send_telegram_message(chat_id, f"❌ Некорректный формат времени. Используйте HH:MM. Ошибка: {e}")
+
 
 def google_search(query):
     try:
@@ -95,9 +102,11 @@ def google_search(query):
         print(f"[google_search] Error: {e}")
         return "❌ Ошибка при поиске."
 
+
 @app.route("/", methods=["GET"])
 def root():
     return "OK", 200
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -110,14 +119,25 @@ def webhook():
             chat_id = callback["message"]["chat"]["id"]
             data_key = callback["data"]
             if data_key == "memory_view":
-                send_telegram_message(chat_id, "🧠 В памяти ассистента хранится:\n(Функциональность будет реализована позже)")
+                memory = user_threads.get(chat_id, [])
+                if memory:
+                    send_telegram_message(chat_id, "🧠 В памяти ассистента:\n" + "\n".join(memory))
+                else:
+                    send_telegram_message(chat_id, "🧠 Память пуста.")
             elif data_key == "memory_clear":
                 user_threads.pop(chat_id, None)
-                send_telegram_message(chat_id, "🛢 Память очищена.")
+                send_telegram_message(chat_id, "🚮 Память очищена.")
             elif data_key == "training_plan":
-                send_telegram_message(chat_id, "🏋️ План тренировок пока не задан.")
+                send_telegram_message(chat_id, "🏋️‍♀ План тренировок:
+1. Разминка
+2. Силовая
+3. Кардио")
             elif data_key == "reminders_list":
-                send_telegram_message(chat_id, "🗓 Функция просмотра напоминаний будет реализована позже.")
+                reminders = user_reminders.get(chat_id, [])
+                if reminders:
+                    send_telegram_message(chat_id, "🗓 Ваши напоминания:\n" + "\n".join(reminders))
+                else:
+                    send_telegram_message(chat_id, "🗓 Напоминаний нет.")
             return jsonify({"ok": True})
 
         if "message" not in data or "text" not in data["message"]:
@@ -139,30 +159,18 @@ def webhook():
             send_telegram_message(chat_id, search_results)
             return jsonify({"ok": True})
 
-        # OpenAI Assistant: thread init + send message
-        if chat_id not in user_threads:
-            thread = openai.beta.threads.create()
-            user_threads[chat_id] = thread.id
-        thread_id = user_threads[chat_id]
-
-        openai.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_message
-        )
-
-        run = openai.beta.threads.runs.create_and_poll(
-            thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
-        )
-
-        messages = list(openai.beta.threads.messages.list(thread_id=thread_id, limit=10))
-        if messages:
-            latest_message = messages[0]
-            parts = latest_message.content
-            if parts:
-                response_text = parts[0].text.value
-                send_telegram_message(chat_id, response_text)
+        if "через" in user_message and "напомни" in user_message:
+            try:
+                parts = user_message.lower().split("через")
+                minutes_part = parts[1].strip().split(" ")[0]
+                reminder_text = " ".join(parts[1].strip().split(" ")[1:]) or "Напоминание"
+                minutes = int(minutes_part)
+                schedule_reminder_delay(chat_id, minutes * 60, reminder_text)
+                send_telegram_message(chat_id, f"⏳ Напоминание установлено через {minutes} мин: {reminder_text}")
+                return jsonify({"ok": True})
+            except Exception as e:
+                send_telegram_message(chat_id, f"❌ Ошибка при установке напоминания: {e}")
+                return jsonify({"ok": True})
 
     except Exception as e:
         print("❌ Общая ошибка:", e)
@@ -170,10 +178,12 @@ def webhook():
 
     return jsonify({"ok": True})
 
+
 @app.route("/cron", methods=["GET"])
 def cron():
     print(f"[cron] Ping received at {datetime.utcnow().isoformat()} UTC")
     return "Cron OK", 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
