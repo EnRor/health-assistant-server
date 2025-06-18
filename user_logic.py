@@ -106,4 +106,4 @@ def handle_user_message(message):
 def process_callback(callback):
     threading.Thread(target=_process_callback_query, args=(callback,), daemon=True).start()
 
-from .core_logic import _process_user_message, _process_callback_query
+
