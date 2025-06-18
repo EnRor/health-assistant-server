@@ -3,6 +3,7 @@ import json
 import time
 import threading
 from datetime import datetime, timedelta
+
 import openai
 import requests
 from flask import Flask, request, jsonify
@@ -19,6 +20,7 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 user_threads = {}
 user_reminders = {}
 
+
 def send_telegram_message(chat_id, text):
     try:
         payload = {
@@ -30,6 +32,7 @@ def send_telegram_message(chat_id, text):
         print("[send_telegram_message]", response.status_code, response.text)
     except Exception as e:
         print(f"[send_telegram_message] Error: {e}")
+
 
 def send_telegram_menu(chat_id):
     keyboard = [
@@ -46,11 +49,13 @@ def send_telegram_menu(chat_id):
     response = requests.post(TELEGRAM_API_URL, json=payload)
     print("[send_telegram_menu]", response.status_code, response.text)
 
+
 def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
     def reminder_job():
         time.sleep(delay_seconds)
         send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
     threading.Thread(target=reminder_job).start()
+
 
 def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time):
     try:
@@ -70,6 +75,7 @@ def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_
         threading.Thread(target=reminder_job).start()
     except ValueError as e:
         send_telegram_message(chat_id, f"❌ Некорректный формат времени. Используйте HH:MM. Ошибка: {e}")
+
 
 def google_search(query):
     try:
@@ -97,9 +103,11 @@ def google_search(query):
         print(f"[google_search] Error: {e}")
         return "❌ Ошибка при поиске."
 
+
 @app.route("/", methods=["GET"])
 def root():
     return "OK", 200
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -114,54 +122,72 @@ def webhook():
             data_key = callback["data"]
 
             if data_key == "memory_view":
+                # Ваша логика для memory_view (оставлена без изменений)
                 thread_id = user_threads.get(chat_id)
-
                 if not thread_id:
                     thread = openai.beta.threads.create()
                     thread_id = thread.id
                     user_threads[chat_id] = thread_id
 
-    # Проверка на уже запущенный запрос
                 existing_runs = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
                 if existing_runs.data and existing_runs.data[0].status in ["queued", "in_progress"]:
                     send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я ещё обрабатываю предыдущий запрос.")
                     return jsonify({"ok": True})
 
-    # Добавляем сообщение "Что ты обо мне помнишь?"
-            openai.beta.threads.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content="Что ты обо мне помнишь?"
-            )
+                openai.beta.threads.messages.create(
+                    thread_id=thread_id,
+                    role="user",
+                    content="Что ты обо мне помнишь?"
+                )
 
-            run = openai.beta.threads.runs.create(
-                thread_id=thread_id,
-                assistant_id=ASSISTANT_ID
-            )
+                run = openai.beta.threads.runs.create(
+                    thread_id=thread_id,
+                    assistant_id=ASSISTANT_ID
+                )
 
-            while True:
-                run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-                if run_status.status == "completed":
-                    break
-                elif run_status.status == "failed":
-                    send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
-                    return jsonify({"ok": True})
-                time.sleep(1)
+                while True:
+                    run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+                    if run_status.status == "completed":
+                        break
+                    elif run_status.status == "failed":
+                        send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
+                        return jsonify({"ok": True})
+                    time.sleep(1)
 
-            messages = openai.beta.threads.messages.list(thread_id=thread_id)
-            assistant_messages = [msg for msg in messages.data if msg.role == "assistant"]
+                messages = openai.beta.threads.messages.list(thread_id=thread_id)
+                assistant_messages = [msg for msg in messages.data if msg.role == "assistant"]
 
-            if assistant_messages:
-                latest_message = assistant_messages[-1]
-                text_parts = [
-                    block.text.value for block in latest_message.content if block.type == "text"
-                ]
-                final_text = "\n".join(text_parts).strip()
-                send_telegram_message(chat_id, final_text if final_text else "⚠️ Ассистент не вернул текст.")
+                if assistant_messages:
+                    latest_message = assistant_messages[-1]
+                    text_parts = [
+                        block.text.value for block in latest_message.content if block.type == "text"
+                    ]
+                    final_text = "\n".join(text_parts).strip()
+                    send_telegram_message(chat_id, final_text if final_text else "⚠️ Ассистент не вернул текст.")
+                else:
+                    send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
+                return jsonify({"ok": True})
+
+            elif data_key == "memory_clear":
+                # Обработка очистки памяти
+                if chat_id in user_threads:
+                    del user_threads[chat_id]
+                send_telegram_message(chat_id, "🗑 Память очищена.")
+                return jsonify({"ok": True})
+
+            elif data_key == "training_plan":
+                # Заглушка — здесь можно добавить логику плана тренировок
+                send_telegram_message(chat_id, "🏋️‍♀ Ваш план тренировок будет здесь.")
+                return jsonify({"ok": True})
+
+            elif data_key == "reminders_list":
+                # Заглушка — можно вывести список напоминаний
+                send_telegram_message(chat_id, "🗓 Здесь будет список ваших напоминаний.")
+                return jsonify({"ok": True})
+
             else:
-                send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
-
-            return jsonify({"ok": True})
+                send_telegram_message(chat_id, "⚠️ Неизвестная команда меню.")
+                return jsonify({"ok": True})
 
         # Проверка наличия текста в сообщении
         if "message" not in data or "text" not in data["message"]:
@@ -301,10 +327,12 @@ def webhook():
 
     return jsonify({"ok": True})
 
+
 @app.route("/cron", methods=["GET"])
 def cron():
     print(f"[cron] Ping received at {datetime.utcnow().isoformat()} UTC")
     return "Cron OK", 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
