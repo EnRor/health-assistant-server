@@ -28,11 +28,12 @@ def send_telegram_message(chat_id, text, reply_markup=None):
             "parse_mode": "Markdown"
         }
         if reply_markup:
-            payload["reply_markup"] = reply_markup
+            payload["reply_markup"] = json.dumps(reply_markup)  # ✅ СЕРИАЛИЗАЦИЯ!
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         print("[send_telegram_message]", response.status_code, response.text)
     except Exception as e:
         print(f"[send_telegram_message] Error: {e}")
+
 
 def answer_callback_query(callback_query_id, text=None):
     url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
