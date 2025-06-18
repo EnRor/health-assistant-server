@@ -34,6 +34,20 @@ def send_telegram_message(chat_id, text):
         print(f"[send_telegram_message] Error: {e}")
 
 
+def answer_callback_query(callback_query_id, text=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    payload = {
+        "callback_query_id": callback_query_id,
+    }
+    if text:
+        payload["text"] = text
+    try:
+        response = requests.post(url, json=payload)
+        print("[answer_callback_query]", response.status_code, response.text)
+    except Exception as e:
+        print(f"[answer_callback_query] Error: {e}")
+
+
 def send_telegram_menu(chat_id):
     keyboard = [
         [{"text": "📋 Память", "callback_data": "memory_view"}],
@@ -119,10 +133,13 @@ def webhook():
         if "callback_query" in data:
             callback = data["callback_query"]
             chat_id = callback["message"]["chat"]["id"]
+            callback_query_id = callback["id"]
             data_key = callback["data"]
 
+            # Обязательно отвечаем на callback_query
+            answer_callback_query(callback_query_id)
+
             if data_key == "memory_view":
-                # Ваша логика для memory_view (оставлена без изменений)
                 thread_id = user_threads.get(chat_id)
                 if not thread_id:
                     thread = openai.beta.threads.create()
@@ -169,19 +186,16 @@ def webhook():
                 return jsonify({"ok": True})
 
             elif data_key == "memory_clear":
-                # Обработка очистки памяти
                 if chat_id in user_threads:
                     del user_threads[chat_id]
                 send_telegram_message(chat_id, "🗑 Память очищена.")
                 return jsonify({"ok": True})
 
             elif data_key == "training_plan":
-                # Заглушка — здесь можно добавить логику плана тренировок
                 send_telegram_message(chat_id, "🏋️‍♀ Ваш план тренировок будет здесь.")
                 return jsonify({"ok": True})
 
             elif data_key == "reminders_list":
-                # Заглушка — можно вывести список напоминаний
                 send_telegram_message(chat_id, "🗓 Здесь будет список ваших напоминаний.")
                 return jsonify({"ok": True})
 
