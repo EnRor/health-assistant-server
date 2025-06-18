@@ -19,7 +19,6 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 user_threads = {}
 user_reminders = {}
 
-
 def send_telegram_message(chat_id, text):
     try:
         payload = {
@@ -53,7 +52,6 @@ def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
         send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
     threading.Thread(target=reminder_job).start()
 
-
 def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time):
     try:
         user_now = datetime.strptime(user_local_time, "%H:%M").replace(year=2000, month=1, day=1)
@@ -72,7 +70,6 @@ def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_
         threading.Thread(target=reminder_job).start()
     except ValueError as e:
         send_telegram_message(chat_id, f"❌ Некорректный формат времени. Используйте HH:MM. Ошибка: {e}")
-
 
 def google_search(query):
     try:
@@ -100,7 +97,6 @@ def google_search(query):
         print(f"[google_search] Error: {e}")
         return "❌ Ошибка при поиске."
 
-
 @app.route("/", methods=["GET"])
 def root():
     return "OK", 200
@@ -118,11 +114,50 @@ def webhook():
             data_key = callback["data"]
 
             if data_key == "memory_view":
-                memory = user_threads.get(chat_id, [])
-                if memory:
-                    send_telegram_message(chat_id, "🧠 В памяти ассистента:\n" + "\n".join(memory))
+                # Обработка кнопки "Память" с запросом к ассистенту
+                thread_id = user_threads.get(chat_id)
+                if not thread_id:
+                    thread = openai.beta.threads.create()
+                    thread_id = thread.id
+                    user_threads[chat_id] = thread_id
+
+                existing_runs = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
+                if existing_runs.data and existing_runs.data[0].status in ["queued", "in_progress"]:
+                    send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я ещё обрабатываю предыдущий запрос.")
+                    return jsonify({"ok": True})
+
+                openai.beta.threads.messages.create(
+                    thread_id=thread_id,
+                    role="user",
+                    content="Что ты обо мне помнишь?"
+                )
+
+                run = openai.beta.threads.runs.create(
+                    thread_id=thread_id,
+                    assistant_id=ASSISTANT_ID
+                )
+
+                while True:
+                    run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+                    if run_status.status == "completed":
+                        break
+                    elif run_status.status == "failed":
+                        send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
+                        return jsonify({"ok": True})
+                    time.sleep(1)
+
+                messages = openai.beta.threads.messages.list(thread_id=thread_id)
+                assistant_messages = [msg for msg in messages.data if msg.role == "assistant"]
+
+                if assistant_messages:
+                    latest_message = assistant_messages[-1]
+                    text_parts = [block.text.value for block in latest_message.content if block.type == "text"]
+                    final_text = "\n".join(text_parts).strip()
+                    send_telegram_message(chat_id, final_text if final_text else "⚠️ Ассистент не вернул текстовый ответ.")
                 else:
-                    send_telegram_message(chat_id, "🧠 Память пуста.")
+                    send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
+
+                return jsonify({"ok": True})
 
             elif data_key == "memory_clear":
                 user_threads.pop(chat_id, None)
@@ -199,11 +234,7 @@ def webhook():
         )
 
         while True:
-            run_status = openai.beta.threads.runs.retrieve(
-                thread_id=thread_id,
-                run_id=run.id
-            )
-
+            run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
             if run_status.status == "completed":
                 break
             elif run_status.status == "requires_action":
@@ -242,19 +273,16 @@ def webhook():
                         })
 
                     elif function_name == "get_user_memory":
-                    # Ассистент сам сгенерирует ответ из памяти — просто возвращаем подтверждение
                         outputs.append({
                             "tool_call_id": tool_call.id,
                             "output": "🧠 Вот что я помню о тебе:"
-                         })
+                        })
 
                     elif function_name == "get_reminders_list":
-                    # Аналогично — ассистент формирует текст на основе памяти
-                            outputs.append({
+                        outputs.append({
                             "tool_call_id": tool_call.id,
-                             "output": "📅 Вот список твоих напоминаний:"
-                         })
-
+                            "output": "📅 Вот список твоих напоминаний:"
+                        })
 
                 openai.beta.threads.runs.submit_tool_outputs(
                     thread_id=thread_id,
@@ -285,12 +313,10 @@ def webhook():
 
     return jsonify({"ok": True})
 
-
 @app.route("/cron", methods=["GET"])
 def cron():
     print(f"[cron] Ping received at {datetime.utcnow().isoformat()} UTC")
     return "Cron OK", 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
