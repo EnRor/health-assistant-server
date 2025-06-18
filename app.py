@@ -241,6 +241,21 @@ def webhook():
                             "output": output_text
                         })
 
+                    elif function_name == "get_user_memory":
+                    # Ассистент сам сгенерирует ответ из памяти — просто возвращаем подтверждение
+                        outputs.append({
+                            "tool_call_id": tool_call.id,
+                            "output": "🧠 Вот что я помню о тебе:"
+                         })
+
+                    elif function_name == "get_reminders_list":
+                    # Аналогично — ассистент формирует текст на основе памяти
+                            outputs.append({
+                            "tool_call_id": tool_call.id,
+                             "output": "📅 Вот список твоих напоминаний:"
+                         })
+
+
                 openai.beta.threads.runs.submit_tool_outputs(
                     thread_id=thread_id,
                     run_id=run.id,
