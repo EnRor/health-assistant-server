@@ -16,6 +16,7 @@ openai.api_key = OPENAI_API_KEY
 
 user_threads = {}
 
+# Telegram message sender
 def send_telegram_message(chat_id, text, reply_markup=None):
     payload = {
         "chat_id": chat_id,
@@ -30,6 +31,8 @@ def send_telegram_message(chat_id, text, reply_markup=None):
     except Exception as e:
         print(f"[send_telegram_message] Error: {e}")
 
+# Меню
+
 def build_main_menu():
     keyboard = [
         [{"text": "📋 Память", "callback_data": "memory_view"}],
@@ -39,29 +42,14 @@ def build_main_menu():
     ]
     return {"inline_keyboard": keyboard}
 
+# Напоминания
 def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
     def job():
         time.sleep(delay_seconds)
         send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
     threading.Thread(target=job, daemon=True).start()
 
-def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time):
-    try:
-        user_now = datetime.strptime(user_local_time, "%H:%M").replace(year=2000, month=1, day=1)
-        target_time = datetime.strptime(reminder_time_absolute, "%H:%M").replace(year=2000, month=1, day=1)
-        delta = (target_time - user_now).total_seconds()
-        if delta < 0:
-            delta += 24 * 3600
-
-        def job():
-            time.sleep(delta)
-            send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
-
-        threading.Thread(target=job, daemon=True).start()
-    except Exception as e:
-        print("[schedule_reminder_time] Error:", e)
-        send_telegram_message(chat_id, f"❌ Ошибка времени: {e}")
-
+# Google Search
 def google_search(query):
     try:
         url = "https://www.googleapis.com/customsearch/v1"
@@ -72,9 +60,10 @@ def google_search(query):
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
-def handle_callback_query_data(callback):
+# Обработка callback
+
+def handle_callback_query_data(chat_id, callback):
     try:
-        chat_id = callback["message"]["chat"]["id"]
         callback_id = callback["id"]
         data_key = callback["data"]
         requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json={"callback_query_id": callback_id})
@@ -83,19 +72,20 @@ def handle_callback_query_data(callback):
             handle_user_query(chat_id, "Что ты обо мне помнишь?")
         elif data_key == "memory_clear":
             user_threads.pop(chat_id, None)
-            send_telegram_message(chat_id, "🖑 Память очищена.")
+            send_telegram_message(chat_id, "🗑 Память очищена.")
         elif data_key == "training_plan":
             send_telegram_message(chat_id, "🏋️ Ваш план тренировок будет здесь.")
         elif data_key == "reminders_list":
-            handle_user_query(chat_id, "Покажи список напоминаний")
+            send_telegram_message(chat_id, "🗓 Здесь будет список ваших напоминаний.")
         else:
             send_telegram_message(chat_id, "⚠️ Неизвестная команда.")
     except Exception as e:
         print("[handle_callback_query_data] Error:", e)
 
-def handle_message_data(message):
+# Обработка сообщений
+
+def handle_message_data(chat_id, message):
     try:
-        chat_id = message["chat"]["id"]
         text = message.get("text", "").strip()
 
         if text.lower() == "/menu":
@@ -125,6 +115,8 @@ def handle_message_data(message):
     except Exception as e:
         print("[handle_message_data] Error:", e)
 
+# OpenAI Run Logic
+
 def handle_user_query(chat_id, user_text):
     try:
         if chat_id not in user_threads:
@@ -152,13 +144,6 @@ def handle_user_query(chat_id, user_text):
                         text = args.get("reminder_text", "Напоминание")
                         schedule_reminder_delay(chat_id, mins * 60, text)
                         out = f"⏳ Напоминание через {mins} минут: {text}"
-
-                    elif fn == "set_reminder_time":
-                        reminder_text = args.get("reminder_text", "Напоминание")
-                        reminder_time_absolute = args.get("reminder_time_absolute")
-                        user_local_time = args.get("user_local_time")
-                        schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time)
-                        out = f"⏰ Напоминание на {reminder_time_absolute}: {reminder_text}"
 
                     elif fn == "google_search":
                         out = google_search(args.get("query", ""))
