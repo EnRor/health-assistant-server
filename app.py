@@ -27,9 +27,19 @@ def webhook():
 
         # Обработка в отдельном потоке
         if "callback_query" in data:
-            threading.Thread(target=handle_callback_query_data, args=(data["callback_query"],), daemon=True).start()
+            callback_data = data["callback_query"]
+            threading.Thread(
+                target=handle_callback_query_data,
+                args=(callback_data, callback_data["message"]["chat"]["id"]),
+                daemon=True
+            ).start()
         elif "message" in data:
-            threading.Thread(target=handle_message_data, args=(data["message"],), daemon=True).start()
+            message_data = data["message"]
+            threading.Thread(
+                target=handle_message_data,
+                args=(message_data, message_data["chat"]["id"]),
+                daemon=True
+            ).start()
 
         return response
 
