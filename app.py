@@ -22,18 +22,27 @@ def webhook():
         data = request.get_json()
         print("[webhook] Incoming:", json.dumps(data, ensure_ascii=False))
 
+        # Немедленно отвечаем Telegram, чтобы избежать повторной отправки
         response = jsonify({"ok": True})
 
         if "callback_query" in data:
-            callback = data["callback_query"]
-            chat_id = callback["message"]["chat"]["id"]
-            threading.Thread(target=handle_callback_query_data, args=(callback, chat_id), daemon=True).start()
+            callback_query = data["callback_query"]
+            threading.Thread(
+                target=handle_callback_query_data,
+                args=(callback_query["message"]["chat"]["id"], callback_query),
+                daemon=True
+            ).start()
+
         elif "message" in data:
             message = data["message"]
-            chat_id = message["chat"]["id"]
-            threading.Thread(target=handle_message_data, args=(message, chat_id), daemon=True).start()
+            threading.Thread(
+                target=handle_message_data,
+                args=(message["chat"]["id"], message),
+                daemon=True
+            ).start()
 
         return response
+
     except Exception as e:
         print("❌ Ошибка во внешнем webhook:", e)
         return jsonify({"ok": True})

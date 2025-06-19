@@ -6,38 +6,29 @@ from datetime import datetime, timedelta
 import openai
 import requests
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+openai.api_key = OPENAI_API_KEY
 
 user_threads = {}
 
 def send_telegram_message(chat_id, text, reply_markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     try:
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        }
-        if reply_markup:
-            payload["reply_markup"] = json.dumps(reply_markup)
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         print("[send_telegram_message]", response.status_code, response.text)
     except Exception as e:
         print(f"[send_telegram_message] Error: {e}")
-
-def answer_callback_query(callback_query_id, text=None):
-    try:
-        payload = {"callback_query_id": callback_query_id}
-        if text:
-            payload["text"] = text
-        response = requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json=payload)
-        print("[answer_callback_query]", response.status_code, response.text)
-    except Exception as e:
-        print(f"[answer_callback_query] Error: {e}")
 
 def build_main_menu():
     keyboard = [
@@ -49,225 +40,158 @@ def build_main_menu():
     return {"inline_keyboard": keyboard}
 
 def schedule_reminder_delay(chat_id, delay_seconds, reminder_text):
-    def reminder_job():
+    def job():
         time.sleep(delay_seconds)
         send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
-    threading.Thread(target=reminder_job, daemon=True).start()
+    threading.Thread(target=job, daemon=True).start()
 
 def schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time):
     try:
         user_now = datetime.strptime(user_local_time, "%H:%M").replace(year=2000, month=1, day=1)
-        reminder_time = datetime.strptime(reminder_time_absolute, "%H:%M").replace(year=2000, month=1, day=1)
-        delta = (reminder_time - user_now).total_seconds()
+        target_time = datetime.strptime(reminder_time_absolute, "%H:%M").replace(year=2000, month=1, day=1)
+        delta = (target_time - user_now).total_seconds()
         if delta < 0:
             delta += 24 * 3600
-        server_now = datetime.now()
-        reminder_datetime_server = server_now + timedelta(seconds=delta)
-        delay_seconds = (reminder_datetime_server - server_now).total_seconds()
 
-        def reminder_job():
-            time.sleep(delay_seconds)
+        def job():
+            time.sleep(delta)
             send_telegram_message(chat_id, f"⏰ Напоминание: {reminder_text}")
 
-        threading.Thread(target=reminder_job, daemon=True).start()
-    except ValueError as e:
-        send_telegram_message(chat_id, f"❌ Некорректный формат времени. Используйте HH:MM. Ошибка: {e}")
+        threading.Thread(target=job, daemon=True).start()
+    except Exception as e:
+        print("[schedule_reminder_time] Error:", e)
+        send_telegram_message(chat_id, f"❌ Ошибка времени: {e}")
 
 def google_search(query):
     try:
         url = "https://www.googleapis.com/customsearch/v1"
-        params = {
-            "key": GOOGLE_API_KEY,
-            "cx": GOOGLE_CSE_ID,
-            "q": query,
-            "num": 3
-        }
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        results = response.json()
-        items = results.get("items", [])
-        if not items:
-            return "⚠️ По вашему запросу ничего не найдено."
-        reply_lines = []
-        for item in items:
-            title = item.get("title")
-            link = item.get("link")
-            snippet = item.get("snippet")
-            reply_lines.append(f"*{title}*\n{snippet}\n{link}")
-        return "\n\n".join(reply_lines)
+        params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": query, "num": 3}
+        res = requests.get(url, params=params).json()
+        items = res.get("items", [])
+        return "\n\n".join([f"*{i['title']}*\n{i['snippet']}\n{i['link']}" for i in items]) or "⚠️ Ничего не найдено."
     except Exception as e:
-        print(f"[google_search] Error: {e}")
-        return "❌ Ошибка при поиске."
+        return f"❌ Ошибка: {e}"
 
-def handle_callback_query_data(callback_query):
+def handle_callback_query_data(callback):
     try:
-        chat_id = callback_query["message"]["chat"]["id"]
-        callback_query_id = callback_query["id"]
-        data_key = callback_query["data"]
-
-        answer_callback_query(callback_query_id)
+        chat_id = callback["message"]["chat"]["id"]
+        callback_id = callback["id"]
+        data_key = callback["data"]
+        requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json={"callback_query_id": callback_id})
 
         if data_key == "memory_view":
-            thread_id = user_threads.get(chat_id)
-            if not thread_id:
-                thread = openai.beta.threads.create()
-                thread_id = thread.id
-                user_threads[chat_id] = thread_id
-
-            openai.beta.threads.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content="Что ты обо мне помнишь?"
-            )
-            run = openai.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-            while True:
-                run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-                if run_status.status == "completed":
-                    break
-                elif run_status.status == "failed":
-                    send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
-                    return
-                time.sleep(1)
-
-            messages = openai.beta.threads.messages.list(thread_id=thread_id)
-            assistant_messages = [m for m in messages.data if m.role == "assistant"]
-            if assistant_messages:
-                latest = assistant_messages[-1]
-                text_parts = [b.text.value for b in latest.content if b.type == "text"]
-                send_telegram_message(chat_id, "\n".join(text_parts).strip())
-            else:
-                send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
-
+            handle_user_query(chat_id, "Что ты обо мне помнишь?")
         elif data_key == "memory_clear":
-            if chat_id in user_threads:
-                del user_threads[chat_id]
-            send_telegram_message(chat_id, "🗑 Память очищена.")
-
+            user_threads.pop(chat_id, None)
+            send_telegram_message(chat_id, "🖑 Память очищена.")
         elif data_key == "training_plan":
-            send_telegram_message(chat_id, "🏋️‍♀ Ваш план тренировок будет здесь.")
-
+            send_telegram_message(chat_id, "🏋️ Ваш план тренировок будет здесь.")
         elif data_key == "reminders_list":
-            send_telegram_message(chat_id, "🗓 Здесь будет список ваших напоминаний.")
-
+            handle_user_query(chat_id, "Покажи список напоминаний")
         else:
-            send_telegram_message(chat_id, "⚠️ Неизвестная команда меню.")
-
+            send_telegram_message(chat_id, "⚠️ Неизвестная команда.")
     except Exception as e:
-        print("❌ Ошибка обработки callback_query:", e)
+        print("[handle_callback_query_data] Error:", e)
 
-def handle_message_data(message, chat_id):
+def handle_message_data(message):
     try:
-        if "text" not in message:
-            return
-        user_message = message["text"].strip()
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "").strip()
 
-        # Обработка команды меню
-        if user_message.lower() == "/menu":
+        if text.lower() == "/menu":
             send_telegram_message(chat_id, "📍 Главное меню:", reply_markup=build_main_menu())
             return
 
-        # Обработка установки напоминания через "через N минут"
-        if "через" in user_message.lower() and "напомни" in user_message.lower():
+        if text.lower().startswith("/search"):
+            query = text[len("/search"):].strip()
+            send_telegram_message(chat_id, google_search(query) if query else "Введите запрос.")
+            return
+
+        if "через" in text.lower() and "напомни" in text.lower():
             try:
-                parts = user_message.lower().split("через")
+                parts = text.lower().split("через")
                 minutes_part = parts[1].strip().split(" ")[0]
-                reminder_text = " ".join(parts[1].strip().split(" ")[1:]) or "Напоминание"
                 minutes = int(minutes_part)
+                reminder_text = " ".join(parts[1].strip().split(" ")[1:]) or "Напоминание"
                 schedule_reminder_delay(chat_id, minutes * 60, reminder_text)
                 send_telegram_message(chat_id, f"⏳ Напоминание установлено через {minutes} мин: {reminder_text}")
                 return
-            except Exception as e:
-                send_telegram_message(chat_id, f"❌ Ошибка при установке напоминания: {e}")
+            except:
+                send_telegram_message(chat_id, "❌ Не удалось понять время.")
                 return
 
+        handle_user_query(chat_id, text)
+
+    except Exception as e:
+        print("[handle_message_data] Error:", e)
+
+def handle_user_query(chat_id, user_text):
+    try:
         if chat_id not in user_threads:
             thread = openai.beta.threads.create()
             user_threads[chat_id] = thread.id
+
         thread_id = user_threads[chat_id]
 
-        runs_list = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
-        if runs_list.data and runs_list.data[0].status in ["queued", "in_progress"]:
-            send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я обрабатываю предыдущий запрос.")
-            return
-
-        openai.beta.threads.messages.create(thread_id=thread_id, role="user", content=user_message)
+        openai.beta.threads.messages.create(thread_id=thread_id, role="user", content=user_text)
         run = openai.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
 
         while True:
             run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            status = run_status.status
-            print(f"[OpenAI Run Status] {status}")
-            if status == "completed":
+            if run_status.status == "completed":
                 break
-            elif status == "failed":
-                send_telegram_message(chat_id, "❌ Ошибка при выполнении запроса.")
-                return
-            elif status == "requires_action":
-                tool_calls = run_status.required_action.submit_tool_outputs.tool_calls
+            elif run_status.status == "requires_action":
                 outputs = []
-                for tool_call in tool_calls:
-                    fname = tool_call.function.name
+                for tool_call in run_status.required_action.submit_tool_outputs.tool_calls:
+                    fn = tool_call.function.name
                     args = json.loads(tool_call.function.arguments)
-                    print(f"[Tool call] {fname} with args {args}")
+                    out = ""
 
-                    if fname == "set_reminder_delay":
-                        delay = args.get("delay_minutes")
+                    if fn == "set_reminder_delay":
+                        mins = args.get("delay_minutes")
                         text = args.get("reminder_text", "Напоминание")
-                        schedule_reminder_delay(chat_id, delay * 60, text)
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": f"Напоминание установлено через {delay} минут."
-                        })
-                    elif fname == "set_reminder_time":
+                        schedule_reminder_delay(chat_id, mins * 60, text)
+                        out = f"⏳ Напоминание через {mins} минут: {text}"
+
+                    elif fn == "set_reminder_time":
                         reminder_text = args.get("reminder_text", "Напоминание")
                         reminder_time_absolute = args.get("reminder_time_absolute")
                         user_local_time = args.get("user_local_time")
                         schedule_reminder_time(chat_id, reminder_time_absolute, reminder_text, user_local_time)
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": f"Напоминание установлено на {reminder_time_absolute}."
-                        })
-                    elif fname == "google_search":
-                        query = args.get("query")
-                        res = google_search(query) if query else "❌ Отсутствует параметр 'query'."
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": res
-                        })
-                    elif fname == "get_user_memory":
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": "🧠 Вот что я помню о тебе."
-                        })
-                    elif fname == "get_reminders_list":
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": "📅 Вот список твоих напоминаний."
-                        })
-                    else:
-                        outputs.append({
-                            "tool_call_id": tool_call.id,
-                            "output": f"❌ Неизвестная функция: {fname}"
-                        })
+                        out = f"⏰ Напоминание на {reminder_time_absolute}: {reminder_text}"
 
-                openai.beta.threads.runs.submit_tool_outputs(thread_id=thread_id, run_id=run.id, tool_outputs=outputs)
-                continue
+                    elif fn == "google_search":
+                        out = google_search(args.get("query", ""))
+
+                    elif fn == "get_user_memory":
+                        out = "🧠 Вот что я помню о тебе:"
+
+                    elif fn == "get_reminders_list":
+                        out = "📅 Вот список твоих напоминаний:"
+
+                    outputs.append({"tool_call_id": tool_call.id, "output": out})
+
+                openai.beta.threads.runs.submit_tool_outputs(
+                    thread_id=thread_id,
+                    run_id=run.id,
+                    tool_outputs=outputs
+                )
+                time.sleep(1)
+            elif run_status.status in ["failed", "cancelled", "expired"]:
+                send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
+                return
             else:
                 time.sleep(1)
 
         messages = openai.beta.threads.messages.list(thread_id=thread_id)
         assistant_msgs = [m for m in messages.data if m.role == "assistant"]
         if assistant_msgs:
-            last_msg = assistant_msgs[-1]
-            text_blocks = [b.text.value for b in last_msg.content if b.type == "text"]
-            final_text = "\n".join(text_blocks).strip()
-            if final_text:
-                send_telegram_message(chat_id, final_text)
-            else:
-                send_telegram_message(chat_id, "⚠️ Ассистент не вернул текстовый ответ.")
+            content_blocks = assistant_msgs[-1].content
+            response_text = "\n".join([b.text.value for b in content_blocks if b.type == "text"]).strip()
+            send_telegram_message(chat_id, response_text or "⚠️ Пустой ответ от ИИ.")
         else:
-            send_telegram_message(chat_id, "⚠️ Ответ от ассистента отсутствует.")
+            send_telegram_message(chat_id, "⚠️ Не удалось получить ответ.")
 
     except Exception as e:
-        print(f"[handle_message_data] Exception: {e}")
-        send_telegram_message(chat_id, "❌ Ошибка при обработке сообщения.")
+        print("[handle_user_query] Error:", e)
+        send_telegram_message(chat_id, "❌ Ошибка при обращении к ИИ.")
