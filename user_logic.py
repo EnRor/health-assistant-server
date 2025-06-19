@@ -30,12 +30,11 @@ def send_telegram_message(chat_id, text, reply_markup=None):
         print(f"[send_telegram_message] Error: {e}")
 
 def answer_callback_query(callback_query_id, text=None):
-    url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
-    payload = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
     try:
-        response = requests.post(url, json=payload)
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        response = requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json=payload)
         print("[answer_callback_query]", response.status_code, response.text)
     except Exception as e:
         print(f"[answer_callback_query] Error: {e}")
@@ -44,7 +43,7 @@ def build_main_menu():
     keyboard = [
         [{"text": "📋 Память", "callback_data": "memory_view"}],
         [{"text": "🗑 Очистить память", "callback_data": "memory_clear"}],
-        [{"text": "🏋️‍♀ План тренировок", "callback_data": "training_plan"}],
+        [{"text": "🏋️ План тренировок", "callback_data": "training_plan"}],
         [{"text": "🗓 Мои напоминания", "callback_data": "reminders_list"}]
     ]
     return {"inline_keyboard": keyboard}
@@ -100,8 +99,9 @@ def google_search(query):
         print(f"[google_search] Error: {e}")
         return "❌ Ошибка при поиске."
 
-def handle_callback_query_data(callback_query, chat_id):
+def handle_callback_query_data(callback_query):
     try:
+        chat_id = callback_query["message"]["chat"]["id"]
         callback_query_id = callback_query["id"]
         data_key = callback_query["data"]
 
@@ -114,37 +114,29 @@ def handle_callback_query_data(callback_query, chat_id):
                 thread_id = thread.id
                 user_threads[chat_id] = thread_id
 
-            runs_list = openai.beta.threads.runs.list(thread_id=thread_id, limit=1)
-            if runs_list.data and runs_list.data[0].status in ["queued", "in_progress"]:
-                send_telegram_message(chat_id, "⚠️ Пожалуйста, подождите, я обрабатываю предыдущий запрос.")
-                return
-
-            openai.beta.threads.messages.create(thread_id=thread_id, role="user", content="Что ты обо мне помнишь?")
+            openai.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content="Что ты обо мне помнишь?"
+            )
             run = openai.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-
             while True:
                 run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-                status = run_status.status
-                if status == "completed":
+                if run_status.status == "completed":
                     break
-                elif status == "failed":
-                    send_telegram_message(chat_id, "❌ Ошибка при выполнении запроса.")
+                elif run_status.status == "failed":
+                    send_telegram_message(chat_id, "❌ Ошибка выполнения запроса.")
                     return
                 time.sleep(1)
 
             messages = openai.beta.threads.messages.list(thread_id=thread_id)
-            assistant_msgs = [m for m in messages.data if m.role == "assistant"]
-
-            if assistant_msgs:
-                last_msg = assistant_msgs[-1]
-                text_blocks = [b.text.value for b in last_msg.content if b.type == "text"]
-                final_text = "\n".join(text_blocks).strip()
-                if final_text:
-                    send_telegram_message(chat_id, final_text)
-                else:
-                    send_telegram_message(chat_id, "⚠️ Ассистент не вернул текстовый ответ.")
+            assistant_messages = [m for m in messages.data if m.role == "assistant"]
+            if assistant_messages:
+                latest = assistant_messages[-1]
+                text_parts = [b.text.value for b in latest.content if b.type == "text"]
+                send_telegram_message(chat_id, "\n".join(text_parts).strip())
             else:
-                send_telegram_message(chat_id, "⚠️ Ответ от ассистента отсутствует.")
+                send_telegram_message(chat_id, "⚠️ Не удалось получить ответ от ассистента.")
 
         elif data_key == "memory_clear":
             if chat_id in user_threads:
@@ -161,8 +153,7 @@ def handle_callback_query_data(callback_query, chat_id):
             send_telegram_message(chat_id, "⚠️ Неизвестная команда меню.")
 
     except Exception as e:
-        print(f"[handle_callback_query_data] Exception: {e}")
-        send_telegram_message(chat_id, "❌ Ошибка при обработке команды меню.")
+        print("❌ Ошибка обработки callback_query:", e)
 
 def handle_message_data(message, chat_id):
     try:
